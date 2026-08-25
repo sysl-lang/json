@@ -1,0 +1,345 @@
+module sh.sysl.json
+
+import sh.sysl.parsing.*
+import sysl.buf.{Buf, buf}
+import sysl.buf.byte_sink
+import sysl.text.from_utf8
+
+// Reading, which is recursive descent over `sh.sysl.parsing`'s cursor.
+//
+// **Almost nothing here is about JSON.** The cursor, the spans, the escape reader with its surrogate
+// pairing, the number reader and the diagnostic that quotes the line and points at the place all
+// come from the toolkit. What is written here is the grammar -- seven productions -- and the three
+// places JSON is *narrower* than the readers it is built on.
+//
+// **The narrowing is done at the call rather than by a flag.** `read_escape` knows the C family's
+// fifteen escapes and JSON has eight, so the byte after the backslash is checked here before the
+// shared reader is trusted with it; `read_number` reads underscores and radix prefixes and JSON has
+// neither, so the text it consumed is examined afterwards. Neither reader grew an option, which is
+// the toolkit's position on policy and the reason a second grammar can disagree with this one.
+
+/** How deep a document may nest before the reader gives up.
+ *
+ * **A recursive-descent reader has the machine's stack for a depth limit, and hostile input knows
+ * it**: `[[[[[…` a hundred thousand times deep is eleven bytes of source per level and there is no
+ * error to report once the stack is gone. So the limit is the reader's rather than the platform's,
+ * it is a diagnostic like any other, and 128 is far past anything a document written by a person or
+ * a program has -- JSON itself recommends implementations accept at least 20.
+ */
+const max_depth: usize = 128
+
+/** A document read into a value, or the first thing wrong with it.
+ *
+ * **The caller builds the `Source` and keeps it**, which is why this takes one rather than a string:
+ * a `Diagnostic` names a place by byte offset, and turning that into `config.json:3:8` with the line
+ * quoted underneath needs the input and its line table. A reader that took the text and made the
+ * `Source` internally would have to give it back with every error, or answer with a message that
+ * cannot say where.
+ *
+ *     val src = source_of("config.json", text)
+ *
+ *     parse(src) match
+ *         Ok(j) -> ...
+ *         Err(d) -> print(d.render(src))
+ *
+ * The whole input has to be one value: trailing text after it is refused, which is what makes this a
+ * reader for documents rather than for a stream of them.
+ */
+parse(src: Source) -> Result[Json, Diagnostic]
+    var p = Parser(src, scan(src), 0)
+    val v = value(&p)?
+
+    ws(&p)
+
+    if !p.s.at_end() then
+        val span = Span(p.s.offset, p.s.offset + 1)
+
+        return Err(expected(span, "the end of the input", found_at(p.src, span)))
+
+    Ok(v)
+end parse
+
+// The reader is a cursor, the input it came from for the messages, and how deep it is. There is no
+// other state: everything a recursive-descent parser knows is in its own recursion.
+private[json] struct Parser
+    src: Source
+    s: Scanner
+    depth: usize
+
+// JSON's whitespace is four bytes where `skip_space` takes six: a form feed and a vertical tab are
+// space to C's `isspace` and are not space in JSON. Same narrowing as the escapes and the numbers
+// get, in the same place and for the same reason.
+private val json_space: ByteSet = byte_set_of(" \t\n\r")
+
+private ws(p: *Parser) -> usize = p.s.accept_while_set(json_space)
+
+private[json] value(p: *Parser) -> Result[Json, Diagnostic]
+    ws(p)
+
+    p.s.peek() match
+        None -> Err(expected(p.s.here(), "a value", "the end of the input"))
+        Some(c) ->
+            if c == u8('{') then
+                object(p)
+            elif c == u8('[') then
+                array(p)
+            elif c == u8('"') then
+                Ok(Str(read_text(p)?))
+            elif c == u8('t') then
+                word(p, "true", Bool(true))
+            elif c == u8('f') then
+                word(p, "false", Bool(false))
+            elif c == u8('n') then
+                word(p, "null", Null)
+            elif c == u8('-') || is_digit(c) then
+                number(p)
+            else
+                val span = Span(p.s.offset, p.s.offset + 1)
+
+                Err(expected(span, "a value", found_at(p.src, span))
+                    .with_note("a value is a number, a string, `true`, `false`, `null`, an array or an object"))
+end value
+
+// A bare word, which has to be the whole word: `truely` is not `true` followed by anything.
+private word(p: *Parser, w: string, v: Json) -> Result[Json, Diagnostic]
+    val m = p.s.mark()
+
+    if p.s.accept_word(w.bytes, is_ident_cont) then return Ok(v)
+
+    p.s.accept_while(is_ident_cont)
+    Err(expected(p.s.span_from(m), s"`$w`", found_at(p.src, p.s.span_from(m))))
+end word
+
+// JSON's numbers are a narrower shape than `read_number`'s, and the narrowing is three tests over
+// the text it consumed rather than three flags on the reader.
+private number(p: *Parser) -> Result[Json, Diagnostic]
+    val m = p.s.mark()
+    val negative = p.s.accept(u8('-'))
+
+    read_number(&p.s) match
+        Err(e) -> Err(error(where(e), str(e)))
+        Ok(n) ->
+            val span = p.s.span_from(m)
+            val run = p.src.text(span)
+            val digits = if negative then run[1..<run.len] else run
+
+            for i in 0..<digits.len
+                if digits[i] == u8('_') then
+                    return Err(error(span, "a number may not have underscores in it"))
+
+            if digits.len > 1 && digits[0] == u8('0') then
+                if is_digit(digits[1]) then
+                    return Err(error(span, "a number may not have a leading zero"))
+
+                if digits[1] != u8('.') && digits[1] != u8('e') && digits[1] != u8('E') then
+                    return Err(error(span, "a number may not have a radix prefix")
+                        .with_note("JSON's numbers are decimal, so `0x10` is not sixteen"))
+
+            // `read_number` leaves a `.` or an `e` with nothing after it where it found it, so a
+            // number that came back whole with one of those next to it is a truncated fraction
+            // rather than a number followed by something else. Saying so beats "expected the end of
+            // the input", which is what the trailing check would otherwise report from two
+            // characters further on.
+            val truncated: Option[u8] = n match
+                Number.Int(_) -> p.s.peek()
+                Number.Real(_) -> None
+
+            if truncated == Some(u8('.')) then
+                return Err(error(here(p), "a number needs a digit after its decimal point"))
+
+            if truncated == Some(u8('e')) || truncated == Some(u8('E')) then
+                return Err(error(here(p), "a number needs digits after its exponent"))
+
+            Ok(n match
+                Number.Real(x) -> Real(if negative then -x else x)
+                Number.Int(v) -> whole(v, negative))
+end number
+
+// The one byte the cursor is on, as a span -- which is what a diagnostic underlines when what is
+// wrong is a single character.
+private here(p: *Parser) -> Span = Span(p.s.offset, p.s.offset + 1)
+
+// An integer as the value it is, or as a float where it will not fit one.
+//
+// **The overflow is answered rather than refused**, because `12345678901234567890` is legal JSON and
+// a reader that stops on it cannot read a document another reader wrote. What it costs is the exact
+// value, which is precisely what every reader that has only floats costs every number -- and the two
+// variants exist so that this is the rare case instead of the usual one.
+private whole(v: ulong, negative: bool) -> Json
+    val most: ulong = 9223372036854775807
+
+    if v > most then
+        Real(if negative then -real(v) else real(v))
+    else
+        Int(if negative then -long(v) else long(v))
+end whole
+
+// JSON has eight escapes and `read_escape` knows fifteen, so the byte after the backslash is checked
+// here before the shared reader is trusted with it.
+private val escapes: ByteSet = byte_set_of("\"\\/bfnrtu")
+
+// A quoted string, decoded.
+//
+// **Nothing here decodes a character, and that is the point.** The bytes between one escape and the
+// next are copied out of the input as a run, and an escape writes the bytes it encodes to into the
+// same place -- so a string with fifty escapes in it pays for its buffer's growth rather than once
+// per piece, and no byte is ever handed to a decoder that assumed it was text.
+//
+// **What that buys is the check at the end.** JSON is UTF-8 by definition (RFC 8259 section 8.1) and
+// a `Source` can be made over arbitrary bytes, so the one place a document can hold something that
+// is not text is inside a string -- and one validation of the gathered bytes says so, with a span to
+// point at. Every byte outside a string is one of JSON's own structural characters, and anything
+// else there is refused for not being a value.
+private read_text(p: *Parser) -> Result[string, Diagnostic]
+    val start = p.s.offset
+
+    if !p.s.accept(u8('"')) then
+        return Err(expected(p.s.here(), "a string", found_at(p.src, p.s.here())))
+
+    var out = byte_sink()
+    var run = p.s.offset
+
+    loop
+        p.s.peek() match
+            None -> return Err(error(Span(start, p.s.offset), "unterminated string")
+                .with_note(s"the string opened at ${p.src.locate(start)}"))
+            Some(c) ->
+                if c == u8('"') then
+                    out.write(p.src.text(Span(run, p.s.offset)))
+                    p.s.bump()
+                    break
+                elif c == u8('\\') then
+                    out.write(p.src.text(Span(run, p.s.offset)))
+
+                    val at = p.s.offset
+                    val known = p.s.peek_at(1) match
+                        Some(e) -> escapes.has(e)
+                        None -> false
+
+                    if !known then
+                        p.s.skip(2)
+
+                        return Err(error(Span(at, p.s.offset), "not one of JSON's escapes")
+                            .with_note("they are \\\" \\\\ \\/ \\b \\f \\n \\r \\t and \\uXXXX"))
+
+                    // `read_escape` takes sysl's `\u{H..H}` and its `\xHH` as well as the four-digit
+                    // form, and JSON has only the four-digit form -- so what follows the `u` is
+                    // checked here for the same reason the byte after the backslash was. All four
+                    // digits are checked at once, so that the message is about the escape rather
+                    // than about whichever digit the shared reader stopped on.
+                    if p.s.peek_at(1) == Some(u8('u')) && !four_hex(p) then
+                        p.s.skip(2)
+                        p.s.accept_while(is_hex_digit)
+
+                        return Err(error(Span(at, p.s.offset), "a code point escape is four hexadecimal digits")
+                            .with_note("`\\u{1f600}` is sysl's spelling of one; JSON writes it `\\ud83d\\ude00`"))
+
+                    read_escape(&p.s) match
+                        Err(e) -> return Err(error(where(e), str(e)))
+                        Ok(ch) -> put_char(&out, ch)
+
+                    run = p.s.offset
+                elif c < 32 then
+                    return Err(error(Span(p.s.offset, p.s.offset + 1),
+                        "a control character has to be escaped inside a string")
+                        .with_note("the ones below a space are written `\\u00XX`"))
+                else
+                    p.s.bump()
+
+    from_utf8(out.text()) match
+        Ok(t) -> Ok(t)
+        Err(e) -> Err(error(Span(start, p.s.offset), "this string is not UTF-8")
+            .with_note("JSON text is UTF-8, and the byte at " + str(e.offset)
+                + " of this string is not part of any character"))
+end read_text
+
+// A character written to a sink as the bytes it encodes to, which is the whole of what an escape
+// means. Four bytes is the most any character needs, so the buffer is a local array and the encoding
+// costs no allocation.
+private put_char(out: *Writer, c: char)
+    var b: [4]u8
+
+    out.write(b[0..<encode_utf8(c, b[0..<4])])
+
+// Whether the four bytes after a `\u` are all hexadecimal digits, which is the only shape JSON's
+// code point escape has.
+private four_hex(p: *Parser) -> bool
+    for k in 2usize..<6
+        val hex = p.s.peek_at(k) match
+            Some(d) -> is_hex_digit(d)
+            None -> false
+
+        if !hex then return false
+
+    true
+end four_hex
+
+private array(p: *Parser) -> Result[Json, Diagnostic]
+    val open = p.s.offset
+
+    if p.depth == max_depth then return Err(too_deep(p))
+
+    var items: Buf[Json] = buf()
+
+    p.s.bump()
+    ws(p)
+
+    if p.s.accept(u8(']')) then return Ok(Arr(items))
+
+    p.depth += 1
+
+    loop
+        items.push(value(p)?)
+        ws(p)
+
+        if p.s.accept(u8(',')) then continue
+        if p.s.accept(u8(']')) then break
+
+        return Err(expected(p.s.here(), "`,` or `]`", found_at(p.src, p.s.here()))
+            .with_note(s"the array opened at ${p.src.locate(open)}"))
+
+    p.depth -= 1
+    Ok(Arr(items))
+end array
+
+private object(p: *Parser) -> Result[Json, Diagnostic]
+    val open = p.s.offset
+
+    if p.depth == max_depth then return Err(too_deep(p))
+
+    var members: Buf[Member] = buf()
+
+    p.s.bump()
+    ws(p)
+
+    if p.s.accept(u8('}')) then return Ok(Obj(members))
+
+    p.depth += 1
+
+    loop
+        ws(p)
+
+        val key = read_text(p)?
+
+        ws(p)
+
+        if !p.s.accept(u8(':')) then
+            return Err(expected(p.s.here(), "`:`", found_at(p.src, p.s.here()))
+                .with_note("a member is a name, a colon, and a value"))
+
+        members.push(Member(key, value(p)?))
+        ws(p)
+
+        if p.s.accept(u8(',')) then continue
+        if p.s.accept(u8('}')) then break
+
+        return Err(expected(p.s.here(), "`,` or `}`", found_at(p.src, p.s.here()))
+            .with_note(s"the object opened at ${p.src.locate(open)}"))
+
+    p.depth -= 1
+    Ok(Obj(members))
+end object
+
+private too_deep(p: *Parser) -> Diagnostic
+    error(Span(p.s.offset, p.s.offset + 1), s"nested more than $max_depth deep")
+        .with_note("a document this deep is nearly always a mistake or an attack, so the reader stops rather than the stack")

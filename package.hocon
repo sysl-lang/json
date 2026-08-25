@@ -1,0 +1,49 @@
+// JSON, read and written, for sysl.
+//
+// A document reads into an ordinary sysl value that owns itself -- an array is a `Buf[Json]` and an
+// object a `Buf[Member]`, with no reference anywhere -- so every walk over one is a plain `match`.
+// It reads as well as writes, because the two halves are the same package's job: a program that
+// changes one member of a configuration file and writes it back needs both.
+//
+// This is the block a consumer writes to reach it:
+//
+//     dependencies {
+//       json { git = "github.com/sysl-lang/json", version = "0.1.0" }
+//     }
+//
+// The coordinate names the package, `json`; the module a program imports is `sh.sysl.json`. Naming
+// the coordinate alone is enough to import `sh.sysl.parsing` too, since imports are transitive --
+// which a caller needs, because `parse` takes a `Source` and answers with a `Diagnostic`.
+
+package {
+  name    = "json"
+  version = "0.1.0"
+
+  // **The oldest compiler this builds with, and the reason is one declaration.** `Obj(members:
+  // Buf[Member])` over a named `struct Member` holding a `Json` is a cycle that passes through
+  // `Buf`'s `[]T`, and every compiler before this one refused it -- *"type 'Json' contains itself,
+  // so it has no finite size"* -- against a reference page saying the cycle is legal. Card `0268`
+  // fixed it, and until it did this package's central type could not be spelled.
+  //
+  // **That is what the package is for as much as the reading is**: a named member with a `key` and
+  // a `value` is what a caller walking an object reads, and the shapes an older compiler does
+  // accept -- a tuple with no field names, or two buffers a caller keeps in step -- are public
+  // payloads that could not be walked back later without breaking every consumer.
+  sysl = "0.0.79"
+}
+
+dependencies {
+  parsing { git = "github.com/sysl-lang/parsing", version = "0.2.0" }
+}
+
+// **`heap = true`, and every one of the three reasons is the same one.** A document's size is not
+// known until it has been read: an array is a `Buf[Json]`, an object a `Buf[Member]`, and a string
+// with an escape in it is gathered into a builder. Nothing here can be given caller-supplied
+// storage, because nothing here knows how much to ask for.
+//
+// **What is NOT here is `os` or `posix`.** This package neither opens nor reads anything: a `Source`
+// is made over text the caller already has, and rendering goes into a sink the caller passes. Where
+// the document came from and where it is going are the program's business.
+requires {
+  heap = true
+}

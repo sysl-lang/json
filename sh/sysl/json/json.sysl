@@ -1,0 +1,206 @@
+module sh.sysl.json
+
+import sysl.buf.{Buf, buf}
+
+// The value, and the two things a caller does with one that a `match` does not do well: ask what it
+// is, and reach into it by name or by position.
+//
+// **The tree owns itself.** An array holds `Buf[Json]` and an object holds `Buf[Member]` -- no `&`
+// anywhere, which is what makes this package worth writing rather than copying. A `Buf[T]` stores
+// its elements in a slice it allocates, so the recursion goes through a pointer the buffer holds
+// rather than through one the type declares, and `Json` has a finite size all the same. Every walk
+// over a document is therefore `j match` on an ordinary value; nothing has to be dereferenced first.
+//
+// **A document read here keeps the order it was written in.** Members are a sequence rather than a
+// map, so `{"b":1,"a":2}` renders back the way it arrived and `get` is a linear scan. That is the
+// right trade for the sizes JSON is used at -- a configuration file, a request body, a message --
+// and it is the only representation that can round-trip, which is what a reader and a writer in one
+// package are for.
+
+/** One member of an object: the name it was written under, and what was written there.
+ *
+ * A named struct rather than a pair, because it is a public payload: a caller walking an object
+ * reads `m.key` and `m.value`, which a tuple's positions cannot say. It is also what forces this
+ * package's compiler floor -- see `package.hocon`.
+ */
+struct Member
+    key: string
+    value: Json
+
+/** A JSON value: one of the seven things the grammar can produce.
+ *
+ * **Numbers are two variants rather than one.** JSON's grammar has a single numeric production and
+ * says nothing about how it is stored, so a reader has to choose, and either choice alone is wrong
+ * for somebody: carrying every number as a `real` loses the exact value of an integer past 2^53,
+ * which is where an identifier or a timestamp in milliseconds lives, and carrying every number as a
+ * `long` cannot represent `0.5` at all. So `Int` is what a number with no fraction and no exponent
+ * reads as, `Real` is everything else, and a caller that does not care asks `as_real`.
+ */
+enum Json
+    Null
+    Bool(b: bool)
+    Int(n: long)
+    Real(x: real)
+    Str(s: string)
+    Arr(items: Buf[Json])
+    Obj(members: Buf[Member])
+
+    /** Whether this is the null value -- which is a value here, not the absence of one. `get` on a
+     * missing member answers `None`; `get` on one written as `null` answers `Some(Null)`, and a
+     * caller that has to tell the two apart can.
+     */
+    is_null(self) -> bool = self match
+        Null -> true
+        _ -> false
+
+    is_bool(self) -> bool = self.as_bool().is_some()
+
+    is_number(self) -> bool = self match
+        Int(_) -> true
+        Real(_) -> true
+        _ -> false
+
+    is_str(self) -> bool = self.as_str().is_some()
+
+    is_array(self) -> bool = self match
+        Arr(_) -> true
+        _ -> false
+
+    is_object(self) -> bool = self match
+        Obj(_) -> true
+        _ -> false
+
+    /** The boolean this is, or `None` for every other shape.
+     *
+     * The `as_*` family never converts and never coerces: a string reading `"true"` is a string, and
+     * `Str("1").as_int()` is `None`. What a JSON document meant is the document's business, so a
+     * caller that wants a number out of a string says so by reaching for `sysl.text`'s parsers.
+     */
+    as_bool(self) -> Option[bool] = self match
+        Bool(b) -> Some(b)
+        _ -> None
+
+    /** The integer this is -- only where the document wrote one. `1.0` was written with a fraction,
+     * so it is a `Real` and this answers `None`; the caller that would take either asks `as_real`.
+     */
+    as_int(self) -> Option[long] = self match
+        Int(n) -> Some(n)
+        _ -> None
+
+    /** The number this is, whichever variant carries it.
+     *
+     * **This is the one accessor that widens**, because the split between the two numeric variants
+     * is about not losing what the document said, and a caller doing arithmetic in floating point
+     * has already decided it does not care. Every `long` up to 2^53 widens exactly; past that the
+     * conversion rounds, which is the same thing every JSON reader that has only floats does to
+     * every number.
+     */
+    as_real(self) -> Option[real] = self match
+        Real(x) -> Some(x)
+        Int(n) -> Some(real(n))
+        _ -> None
+
+    as_str(self) -> Option[string] = self match
+        Str(s) -> Some(s)
+        _ -> None
+
+    /** How many elements an array has, or how many members an object has. Anything else is zero,
+     * which is what makes `for i in 0..<j.len()` safe to write against a value whose shape has not
+     * been checked yet.
+     */
+    len(self) -> usize = self match
+        Arr(items) -> items.len()
+        Obj(members) -> members.len()
+        _ -> 0
+
+    /** The element at a position, for an array. `None` for an index past the end and `None` for a
+     * value that is not an array -- the two are the same answer on purpose, since a caller reaching
+     * into a document it did not write cannot usefully distinguish them.
+     */
+    at(self, i: usize) -> Option[Json] = self match
+        Arr(items) -> if i < items.len() then Some(items.at(i)) else None
+        _ -> None
+
+    /** The member at a position, for an object -- name and value together, in the order the document
+     * wrote them. This is how an object is walked when the names are not known in advance.
+     */
+    member(self, i: usize) -> Option[Member] = self match
+        Obj(members) -> if i < members.len() then Some(members.at(i)) else None
+        _ -> None
+
+    /** The value written under a name, or `None` where there is none.
+     *
+     * **The scan is linear and the first match wins.** JSON permits a name to appear twice and says
+     * nothing about what that means; every reader has to pick, and picking the first keeps this
+     * agreeing with what a caller walking the members in order would find.
+     */
+    get(self, key: string) -> Option[Json]
+        self match
+            Obj(members) ->
+                for i in 0..<members.len()
+                    val m = members.at(i)
+
+                    if m.key == key then return Some(m.value)
+
+                None
+            _ -> None
+    end get
+
+    /** Whether an object has a member of this name, `null` included. */
+    has(self, key: string) -> bool = self.get(key).is_some()
+end Json
+
+/** Two members are equal when they were written under the same name and hold equal values. */
+impl Eq for Member
+    eq(self, rhs: Member) -> bool = self.key == rhs.key && self.value == rhs.value
+
+/** Two values are equal when they are the same shape holding equal things.
+ *
+ * **The two numeric variants do not meet**, so `Int(1)` and `Real(1.0)` are not equal. That reads
+ * oddly beside `1 == 1.0` in the language and it is the only defensible answer here: this equality
+ * is about two *documents* saying the same thing, and `1` and `1.0` are two different texts that a
+ * round trip has to keep apart. A caller comparing numbers regardless of how they were written has
+ * `as_real` and the language's own `==`.
+ *
+ * **Objects compare in order.** `{"a":1,"b":2}` and `{"b":2,"a":1}` are not equal, for the same
+ * reason: what is held is the sequence the document wrote, and a reordering is a different text.
+ */
+impl Eq for Json
+    eq(self, rhs: Json) -> bool
+        self match
+            Null -> rhs.is_null()
+            Bool(a) -> rhs match
+                Bool(b) -> a == b
+                _ -> false
+            Int(a) -> rhs match
+                Int(b) -> a == b
+                _ -> false
+            Real(a) -> rhs match
+                Real(b) -> a == b
+                _ -> false
+            Str(a) -> rhs match
+                Str(b) -> a == b
+                _ -> false
+            Arr(a) -> rhs match
+                Arr(b) ->
+                    if a.len() != b.len() then return false
+
+                    for i in 0..<a.len()
+                        if a.at(i) != b.at(i) then return false
+
+                    true
+                _ -> false
+            Obj(a) -> rhs match
+                Obj(b) ->
+                    if a.len() != b.len() then return false
+
+                    for i in 0..<a.len()
+                        val x = a.at(i)
+                        val y = b.at(i)
+
+                        if x.key != y.key || x.value != y.value then return false
+
+                    true
+                _ -> false
+    end eq
+end Json

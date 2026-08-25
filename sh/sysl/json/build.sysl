@@ -1,0 +1,99 @@
+module sh.sysl.json
+
+import sysl.buf.{Buf, buf}
+
+// Building a document, which is the case a reader says nothing about: a program assembling a request
+// body, a configuration file it is about to write, a reply it is about to send.
+//
+// **The variants are already constructors** -- `Str("sysl")`, `Int(3)`, `Bool(true)`, `Null` -- so
+// nothing here is needed for a scalar. What is needed is the two shapes that grow, because filling
+// one in place would mean reaching into an enum's payload and mutating it, and building it beside
+// the value and handing it over at the end is both safer and what the code reads like anyway.
+//
+// **The `push_*` and `put_*` families are the whole ergonomic argument.** Written without them a
+// caller says `o.put("port", Int(long(port)))`, and the `Int` and the `long` are noise about
+// representation in the middle of a line about a port number. `o.put_int("port", port)` is the same
+// value with the representation left to the builder.
+
+/** An array under construction: `push` what goes in it, then `finish`.
+ *
+ * The builder is spent by `finish` in the sense that matters -- the buffer is handed to the value
+ * rather than copied -- so pushing afterwards changes a document somebody else is holding. Build
+ * one, finish it, and let it go.
+ */
+struct ArrayBuilder
+    private[json] items: Buf[Json]
+
+    len(self) -> usize = self.items.len()
+
+    is_empty(self) -> bool = self.items.is_empty()
+
+    push(*self, v: Json) = self.items.push(v)
+
+    push_null(*self) = self.items.push(Null)
+
+    push_bool(*self, b: bool) = self.items.push(Bool(b))
+
+    push_int(*self, n: long) = self.items.push(Int(n))
+
+    push_real(*self, x: real) = self.items.push(Real(x))
+
+    push_str(*self, s: string) = self.items.push(Str(s))
+
+    finish(self) -> Json = Arr(self.items)
+end ArrayBuilder
+
+/** An object under construction: `put` each member in the order it should be written, then `finish`.
+ *
+ * **Nothing here checks for a repeated name**, which is the same position the reader takes: JSON
+ * permits one and says nothing about what it means, so refusing it would be this package inventing a
+ * rule. A caller that wants the last write to win asks `has` first, or builds into a
+ * `sysl.container`'s map and puts the answers here.
+ */
+struct ObjectBuilder
+    private[json] members: Buf[Member]
+
+    len(self) -> usize = self.members.len()
+
+    is_empty(self) -> bool = self.members.is_empty()
+
+    put(*self, key: string, v: Json) = self.members.push(Member(key, v))
+
+    put_null(*self, key: string) = self.members.push(Member(key, Null))
+
+    put_bool(*self, key: string, b: bool) = self.members.push(Member(key, Bool(b)))
+
+    put_int(*self, key: string, n: long) = self.members.push(Member(key, Int(n)))
+
+    put_real(*self, key: string, x: real) = self.members.push(Member(key, Real(x)))
+
+    put_str(*self, key: string, s: string) = self.members.push(Member(key, Str(s)))
+
+    finish(self) -> Json = Obj(self.members)
+end ObjectBuilder
+
+/** An empty array to fill in. */
+array_builder() -> ArrayBuilder = ArrayBuilder(buf())
+
+/** An empty object to fill in. */
+object_builder() -> ObjectBuilder = ObjectBuilder(buf())
+
+/** The array of everything in a slice, for the case that needs no builder at all.
+ *
+ *     val j = array_of([Int(1), Int(2), Int(3)])
+ */
+array_of(items: []const Json) -> Json
+    var b: Buf[Json] = buf()
+
+    b.extend(items)
+    Arr(b)
+
+/** The array of a slice of strings, which is the one this saves the most typing on: a list of names,
+ * of tags, of paths.
+ */
+array_of_str(items: []const string) -> Json
+    var b: Buf[Json] = buf()
+
+    for i in 0..<items.len do b.push(Str(items[i]))
+
+    Arr(b)

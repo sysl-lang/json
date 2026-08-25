@@ -1,0 +1,252 @@
+module sh.sysl.json
+
+import sysl.buf.byte_sink
+import sysl.math.Float
+import sysl.text.{StrBuilder, from_utf8, parse_real, str_builder}
+
+// Writing, which is the half of a JSON package that a reader alone cannot do: a program that reads a
+// document, changes one member and writes it back needs both, and a program that builds a request
+// body needs only this.
+//
+// **The compact form is the `Display`**, so `str(j)`, `print(j)` and `s"$j"` all produce JSON. That
+// is the rendering a wire wants -- no spaces anywhere, which is what every other encoder means by
+// compact -- and it is the one that round-trips: `parse(source_of("x", str(j)))` reads back what `j`
+// held, for every value this package can hold.
+//
+// **`pretty` is for a person**, and is a different function rather than a flag, because the two have
+// nothing in common at the call site: one is what a program sends and the other is what a program
+// prints while somebody is looking at it.
+
+/** The value as JSON, compactly: no space between anything.
+ *
+ * Rendering goes through the sink rather than building a string, so `print(j)` writes a large
+ * document straight to the output with nothing assembled in the middle. `str(j)` is the same
+ * rendering into a buffer, for a caller that wants the text.
+ */
+impl Display for Json
+    display(self, out: *Writer, fmt: FormatSpec) = compact(self, out)
+
+// The compact rendering, which is the only one that is written twice: `pretty` cannot share it,
+// because where it puts a newline depends on what it is inside.
+private compact(j: Json, out: *Writer)
+    j match
+        Null -> out.write("null".bytes)
+        Bool(b) -> out.write(if b then "true".bytes else "false".bytes)
+        Int(n) -> write_number(out, n)
+        Real(x) -> out.write(real_text(x).bytes)
+        Str(s) -> quote(s, out)
+        Arr(items) ->
+            out.write("[".bytes)
+
+            for i in 0..<items.len()
+                if i > 0 then out.write(",".bytes)
+
+                compact(items.at(i), out)
+
+            out.write("]".bytes)
+        Obj(members) ->
+            out.write("{".bytes)
+
+            for i in 0..<members.len()
+                if i > 0 then out.write(",".bytes)
+
+                val m = members.at(i)
+
+                quote(m.key, out)
+                out.write(":".bytes)
+                compact(m.value, out)
+
+            out.write("}".bytes)
+end compact
+
+// A number written straight into the sink, at the width the value has. `display` is what `print` and
+// `str` reach for the same type, so an integer inside a document renders the way the same integer
+// outside one does.
+private write_number[T: Display](out: *Writer, v: T) = v.display(out, FormatSpec(0, -1, false))
+
+// A float as the shortest text that reads back as the same value.
+//
+// **`str(x)` will not do, and this is the one place the package cannot use the library's rendering.**
+// `str` is `%g` at six significant digits, so a third renders as `0.333333` -- a *different number*,
+// which is a wrong answer in a format whose whole job is carrying the value somewhere else. Writing
+// every float at seventeen digits instead is exact and unreadable: `0.1` becomes
+// `0.10000000000000001`.
+//
+// So this asks for fifteen, sixteen and seventeen digits in turn and takes the first that reads back
+// as the value it started with. That is the standard shortest-round-trip rule, and it is why `0.1`
+// stays `0.1` while a third gets the digits it needs.
+//
+// **A float with no fraction gets a `.0`**, so that `Real(1.0)` does not render as `1` and read back
+// as `Int(1)`. The two numeric variants are only worth having if a round trip keeps them apart.
+//
+// **A NaN or an infinity is written `null`.** JSON's grammar has no spelling for either -- there is
+// nothing to write -- and refusing would mean this renderer could fail, so a document could not be
+// built without handling an error that a document made of ordinary numbers can never raise. `null`
+// is what JavaScript's own `JSON.stringify` writes, so it is also what a reader on the other end
+// expects to see.
+private real_text(x: real) -> string
+    if !x.is_finite() then return "null"
+
+    for digits in 15..<18
+        val t = rendered(x, digits)
+
+        val exact = parse_real(t.bytes) match
+            Ok(back) -> back == x
+            Err(_) -> false
+
+        if exact then return with_point(t)
+
+    with_point(rendered(x, 17))
+end real_text
+
+private rendered(x: real, digits: int) -> string
+    var sink = byte_sink()
+
+    display_real(x, &sink, FormatSpec(0, digits, false))
+    from_utf8(sink.text()).unwrap()
+
+// `1` is an integer to a JSON reader and `1.0` is not, so a rendering with neither a point nor an
+// exponent in it gets one.
+private with_point(t: string) -> string
+    val bs = t.bytes
+
+    for i in 0..<bs.len
+        if bs[i] == u8('.') || bs[i] == u8('e') || bs[i] == u8('E') then return t
+
+    t + ".0"
+end with_point
+
+/** The value as JSON a person reads: one member or element to a line, indented by `step` spaces per
+ * level, with a space after every colon.
+ *
+ * An empty array and an empty object stay on one line as `[]` and `{}`, because the alternative
+ * spends two lines saying there is nothing there.
+ *
+ *     print(pretty(j, 2))
+ *
+ *     {
+ *       "name": "sysl",
+ *       "tags": [
+ *         "systems",
+ *         "small"
+ *       ]
+ *     }
+ */
+pretty(j: Json, step: usize) -> string
+    var b = str_builder()
+
+    laid_out(j, &b, step, 0)
+    b.finish()
+
+private laid_out(j: Json, b: *StrBuilder, step: usize, depth: usize)
+    j match
+        Arr(items) ->
+            if items.is_empty()
+                b.push("[]")
+                return
+
+            b.push("[\n")
+
+            for i in 0..<items.len()
+                if i > 0 then b.push(",\n")
+
+                indent(b, step, depth + 1)
+                laid_out(items.at(i), b, step, depth + 1)
+
+            b.push("\n")
+            indent(b, step, depth)
+            b.push("]")
+        Obj(members) ->
+            if members.is_empty()
+                b.push("{}")
+                return
+
+            b.push("{\n")
+
+            for i in 0..<members.len()
+                if i > 0 then b.push(",\n")
+
+                val m = members.at(i)
+
+                indent(b, step, depth + 1)
+                quote_into(m.key, b)
+                b.push(": ")
+                laid_out(m.value, b, step, depth + 1)
+
+            b.push("\n")
+            indent(b, step, depth)
+            b.push("}")
+        _ -> b.push(str(j))
+end laid_out
+
+private indent(b: *StrBuilder, step: usize, depth: usize)
+    for _ in 0..<step * depth do b.push(" ")
+
+/** A string as a JSON string literal, quotes and escapes included.
+ *
+ * It is public because a program that assembles JSON by hand -- a log line, a template, a body built
+ * from a format string -- needs exactly this and nothing else in the package. What it escapes is the
+ * seven JSON names their character, and everything below a space as `\u00XX`; everything above stays
+ * as it is, since a JSON string is UTF-8 text and there is nothing to escape it into.
+ */
+quoted(s: string) -> string
+    var b = str_builder()
+
+    quote_into(s, &b)
+    b.finish()
+
+private quote_into(s: string, b: *StrBuilder)
+    b.push("\"")
+
+    val bs = s.bytes
+    var start: usize = 0
+
+    for i in 0..<bs.len
+        val rep = escape_of(bs[i])
+
+        if rep != ""
+            b.push(s[start..<i])
+            b.push(rep)
+            start = i + 1
+
+    b.push(s[start..])
+    b.push("\"")
+end quote_into
+
+// The same escaping written straight to a sink, for the compact path, which has no builder.
+private quote(s: string, out: *Writer)
+    out.write("\"".bytes)
+
+    val bs = s.bytes
+    var start: usize = 0
+
+    for i in 0..<bs.len
+        val rep = escape_of(bs[i])
+
+        if rep != ""
+            out.write(s[start..<i].bytes)
+            out.write(rep.bytes)
+            start = i + 1
+
+    out.write(s[start..].bytes)
+    out.write("\"".bytes)
+end quote
+
+// What one byte has to be written as, or the empty string where it may stand for itself. Only the
+// bytes below a space, the quote and the backslash need anything; a multi-byte character's bytes are
+// all above 127 and fall through.
+private escape_of(b: u8) -> string
+    if b == u8('"') then "\\\""
+    elif b == u8('\\') then "\\\\"
+    elif b == u8('\b') then "\\b"
+    elif b == u8('\f') then "\\f"
+    elif b == u8('\n') then "\\n"
+    elif b == u8('\r') then "\\r"
+    elif b == u8('\t') then "\\t"
+    elif b < 32 then "\\u00" + hex_of(b >> 4) + hex_of(b & 15)
+    else ""
+end escape_of
+
+// Indexing a string yields a byte, so the character has to be asked for: `str` of the byte renders
+// the number it is, which is a wrong answer that looks like a right one.
+private hex_of(n: u8) -> string = str(char("0123456789abcdef"[usize(n)]))

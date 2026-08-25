@@ -1,0 +1,559 @@
+module sh.sysl.json
+@tests
+
+import sh.sysl.parsing.{Diagnostic, Source, source, source_of}
+import sysl.buf.{Buf, buf}
+import sysl.text.str_builder
+
+// What this package claims, run by `sysl test .`.
+//
+// **A document is asserted as text rather than as a tree wherever it can be**, because `str(j)` is
+// the compact rendering and a round trip through it is the strongest single claim here: a text that
+// reads and renders back to itself has exercised the reader and the writer against each other, and
+// nothing about the assertion has to know the shape of the value in between.
+//
+// The refusals are asserted the same way -- the message a caller would print -- so that a wrong
+// answer and a right one are the same kind of comparison.
+
+private read(text: string) -> Result[Json, Diagnostic] = parse(source_of("t.json", text))
+
+// Compare, and say what the difference was. A rendering's whole contract is its exact text, so a
+// failure that only said `false` would leave the reader diffing by eye.
+private same(got: string, want: string, what: string, file: string = __FILE__, line: long = __LINE__)
+    if got != want
+        print("\n")
+        print(what)
+        print("\nwanted:\n")
+        print(want)
+        print("got:\n")
+        print(got)
+
+    assert(got == want, what, file, line)
+end same
+
+// What a text reads as, compactly, or the message it was refused with.
+private shown(text: string) -> string
+    read(text) match
+        Ok(j) -> str(j)
+        Err(d) -> s"error: ${d.message}"
+
+private value_of(text: string) -> Json = read(text).unwrap()
+
+// -- the shapes -----------------------------------------------------------------------------------
+
+@test
+every_shape_reads()
+    assert_eq(shown("null"), "null")
+    assert_eq(shown("true"), "true")
+    assert_eq(shown("false"), "false")
+    assert_eq(shown("42"), "42")
+    assert_eq(shown("-7"), "-7")
+    assert_eq(shown("0.5"), "0.5")
+    assert_eq(shown("\"hi\""), "\"hi\"")
+    assert_eq(shown("[]"), "[]")
+    assert_eq(shown("{}"), "{}")
+end every_shape_reads
+
+@test
+whitespace_around_anything_is_skipped()
+    assert_eq(shown("  \t\r\n 42 \n"), "42")
+    assert_eq(shown(" [ 1 , 2 ] "), "[1,2]")
+    assert_eq(shown("{ \"a\" : 1 }"), "{\"a\":1}")
+
+@test
+values_nest_and_the_tree_owns_itself()
+    assert_eq(shown("[1,[2,[3]]]"), "[1,[2,[3]]]")
+    assert_eq(shown("{\"a\":{\"b\":[1,2]}}"), "{\"a\":{\"b\":[1,2]}}")
+    assert_eq(shown("[{\"a\":[{}]}]"), "[{\"a\":[{}]}]")
+
+// The claim the two numeric variants exist for: what the document wrote decides which one, and an
+// integer past a `real`'s exact range survives.
+@test
+a_number_keeps_the_shape_it_was_written_in()
+    assert(value_of("1").as_int() == Some(1), "a whole number is an Int")
+    assert(value_of("1").as_real() == Some(1.0), "and widens on request")
+    assert(value_of("1.0").as_int() == None, "a fraction is not an Int, however round")
+    assert(value_of("1.0").as_real() == Some(1.0), "it is a Real")
+    assert(value_of("1e3").as_int() == None, "an exponent makes it a Real too")
+    assert(value_of("1e3").as_real() == Some(1000.0), "worth 1000")
+    assert(value_of("9007199254740993").as_int() == Some(9007199254740993),
+        "past 2^53, which a reader with only floats cannot hold")
+end a_number_keeps_the_shape_it_was_written_in
+
+// An integer larger than a `long` is legal JSON, so it is answered rather than refused -- as a
+// `Real`, which is what a reader with only floats does to every number.
+@test
+an_integer_too_large_for_a_long_reads_as_a_real()
+    assert(value_of("9223372036854775807").as_int() == Some(9223372036854775807), "the largest long")
+    assert(value_of("9223372036854775808").as_int() == None, "one past it is not an Int")
+    assert(value_of("9223372036854775808").as_real().is_some(), "it is a Real")
+    assert_eq(shown("-9223372036854775807"), "-9223372036854775807")
+
+@test
+escapes_decode_and_surrogates_pair()
+    assert_eq(value_of("\"a\\nb\"").as_str(), Some("a\nb"))
+    assert_eq(value_of("\"\\u0041\"").as_str(), Some("A"))
+    assert_eq(value_of("\"\\ud83d\\ude00\"").as_str(), Some("😀"))
+    assert_eq(value_of("\"\\\"\\\\\\/\"").as_str(), Some("\"\\/"))
+    assert_eq(value_of("\"\\b\\f\\r\\t\"").as_str(), Some("\b\f\r\t"))
+end escapes_decode_and_surrogates_pair
+
+@test
+text_outside_ascii_survives_unescaped()
+    assert_eq(value_of("\"héllo 世界\"").as_str(), Some("héllo 世界"))
+    assert_eq(shown("\"héllo\""), "\"héllo\"")
+
+// -- what is refused ------------------------------------------------------------------------------
+
+// The narrowing that is JSON's rather than the readers' -- underscores, leading zeros and radix
+// prefixes are all things `read_number` accepts and this grammar does not.
+@test
+numbers_are_narrower_than_the_readers()
+    assert_eq(shown("01"), "error: a number may not have a leading zero")
+    assert_eq(shown("1_0"), "error: a number may not have underscores in it")
+    assert_eq(shown("0x10"), "error: a number may not have a radix prefix")
+    assert_eq(shown("0"), "0")
+    assert_eq(shown("0.5"), "0.5")
+    assert_eq(shown("-0"), "0")
+end numbers_are_narrower_than_the_readers
+
+@test
+strings_are_narrower_than_the_readers()
+    assert_eq(shown("\"\\x41\""), "error: not one of JSON's escapes")
+    assert_eq(shown("\"\\u{41}\""), "error: a code point escape is four hexadecimal digits")
+    assert_eq(shown("\"\\u41\""), "error: a code point escape is four hexadecimal digits")
+    assert_eq(shown("\"a"), "error: unterminated string")
+    assert_eq(shown("\"a\nb\""), "error: a control character has to be escaped inside a string")
+end strings_are_narrower_than_the_readers
+
+@test
+the_grammar_says_what_it_expected()
+    assert_eq(shown("[1 2]"), "error: expected `,` or `]`")
+    assert_eq(shown("{\"a\" 1}"), "error: expected `:`")
+    assert_eq(shown("{a:1}"), "error: expected a string")
+    assert_eq(shown("truely"), "error: expected `true`")
+    assert_eq(shown("[1],"), "error: expected the end of the input")
+    assert_eq(shown(""), "error: expected a value")
+    assert_eq(shown("@"), "error: expected a value")
+    assert_eq(shown("[1,]"), "error: expected a value")
+end the_grammar_says_what_it_expected
+
+// The limit is the reader's rather than the machine's, so hostile input is a diagnostic instead of
+// a stack that has run out.
+@test
+nesting_stops_at_a_depth_this_reader_chose()
+    assert(read(nest(max_depth)).is_ok(), s"$max_depth deep is allowed")
+    assert_eq(shown(nest(max_depth + 1)), s"error: nested more than $max_depth deep")
+    assert_eq(shown(braces(max_depth + 1)), s"error: nested more than $max_depth deep")
+
+// `[[[…]]]` n deep, as a text.
+private nest(n: usize) -> string
+    var b = str_builder()
+
+    for _ in 0..<n do b.push("[")
+
+    for _ in 0..<n do b.push("]")
+
+    b.finish()
+end nest
+
+private braces(n: usize) -> string
+    var b = str_builder()
+
+    for _ in 0..<n do b.push("{\"a\":")
+
+    b.push("1")
+
+    for _ in 0..<n do b.push("}")
+
+    b.finish()
+end braces
+
+// -- reaching into a document ---------------------------------------------------------------------
+
+@test
+a_value_says_what_it_is()
+    val j = value_of("{\"a\":1,\"b\":[true,null],\"c\":\"x\",\"d\":1.5}")
+
+    assert(j.is_object(), "the document is an object")
+    assert(j.get("b").unwrap().is_array(), "b is an array")
+    assert(j.get("a").unwrap().is_number(), "a is a number")
+    assert(j.get("c").unwrap().is_str(), "c is a string")
+    assert(j.get("b").unwrap().at(0).unwrap().is_bool(), "the first element is a boolean")
+    assert(j.get("b").unwrap().at(1).unwrap().is_null(), "the second is null")
+    assert_eq(j.len(), 4)
+    assert_eq(j.get("b").unwrap().len(), 2)
+end a_value_says_what_it_is
+
+@test
+the_accessors_never_convert()
+    val j = value_of("{\"n\":\"1\",\"t\":\"true\"}")
+
+    assert(j.get("n").unwrap().as_int() == None, "a string holding digits is a string")
+    assert(j.get("t").unwrap().as_bool() == None, "and one holding `true` is a string")
+    assert(j.get("n").unwrap().as_str() == Some("1"), "which is what it answers as")
+end the_accessors_never_convert
+
+// A missing member and one written as `null` are different answers, which is the whole reason `Null`
+// is a value here rather than the absence of one.
+@test
+a_missing_member_and_a_null_one_are_told_apart()
+    val j = value_of("{\"a\":null}")
+
+    assert(j.get("a") == Some(Null), "a is there and is null")
+    assert(j.get("b") == None, "b is not there")
+    assert(j.has("a"), "having it is not about what it holds")
+    assert(!j.has("b"), "and b is still missing")
+end a_missing_member_and_a_null_one_are_told_apart
+
+// A scalar is not an error to index into, which is what makes an accessor chain safe to write
+// against a document nobody has checked the shape of yet.
+@test
+reaching_into_the_wrong_shape_answers_none()
+    val j = value_of("42")
+
+    assert(j.get("a") == None, "a number has no members")
+    assert(j.at(0) == None, "nor elements")
+    assert(j.member(0) == None, "nor members by position")
+    assert_eq(j.len(), 0)
+    assert(value_of("[1]").at(1) == None, "and an index past the end is the same answer")
+end reaching_into_the_wrong_shape_answers_none
+
+// JSON permits a repeated name and says nothing about what it means. The scan is in order, so the
+// first one wins -- which is what a caller walking the members itself would find.
+@test
+a_repeated_name_keeps_both_and_the_first_wins()
+    val j = value_of("{\"a\":1,\"a\":2}")
+
+    assert_eq(j.len(), 2)
+    assert(j.get("a") == Some(Int(1)), "the first")
+    assert(j.member(1).unwrap().value == Int(2), "and the second is still there")
+end a_repeated_name_keeps_both_and_the_first_wins
+
+@test
+members_keep_the_order_they_were_written_in()
+    val j = value_of("{\"b\":1,\"a\":2}")
+
+    assert_eq(j.member(0).unwrap().key, "b")
+    assert_eq(j.member(1).unwrap().key, "a")
+    assert_eq(str(j), "{\"b\":1,\"a\":2}")
+end members_keep_the_order_they_were_written_in
+
+// -- equality -------------------------------------------------------------------------------------
+
+@test
+equality_is_about_two_documents_saying_the_same_thing()
+    assert(value_of("[1,{\"a\":null}]") == value_of("[1,{\"a\":null}]"), "same text, same value")
+    assert(value_of("[1,2]") != value_of("[2,1]"), "order counts in an array")
+    assert(value_of("{\"a\":1,\"b\":2}") != value_of("{\"b\":2,\"a\":1}"), "and in an object")
+    assert(value_of("[1]") != value_of("[1,1]"), "so does length")
+    assert(Int(1) != Real(1.0), "`1` and `1.0` are two different texts")
+    assert(Null != Bool(false), "and null is not false")
+    assert(Str("1") != Int(1), "nor is a string its digits")
+end equality_is_about_two_documents_saying_the_same_thing
+
+// -- writing --------------------------------------------------------------------------------------
+
+// The strongest single claim in the file: a text that reads and renders back to itself has run the
+// reader and the writer against each other, and nothing in the assertion knows the shape in between.
+@test
+compact_output_round_trips()
+    val texts = ["null", "true", "false", "0", "-1", "1.5", "\"\"", "\"a\\nb\"", "[]", "{}",
+        "[1,2,3]", "{\"a\":1}", "{\"a\":[1,{\"b\":null}],\"c\":\"héllo\"}"]
+
+    for i in 0..<texts.len
+        val once = str(value_of(texts[i]))
+
+        assert_eq(once, texts[i])
+        assert_eq(str(value_of(once)), texts[i])
+end compact_output_round_trips
+
+@test
+a_string_is_written_back_with_its_escapes()
+    assert_eq(quoted("a\"b"), "\"a\\\"b\"")
+    assert_eq(quoted("a\\b"), "\"a\\\\b\"")
+    assert_eq(quoted("\n\r\t\b\f"), "\"\\n\\r\\t\\b\\f\"")
+    assert_eq(quoted("a\u{1}b"), "\"a\\u0001b\"")
+    assert_eq(quoted("héllo 世界"), "\"héllo 世界\"")
+    assert_eq(quoted(""), "\"\"")
+end a_string_is_written_back_with_its_escapes
+
+// A control character goes out as `\u00XX` and reads back as itself, which is the round trip the
+// escaping exists for.
+@test
+a_control_character_survives_a_round_trip()
+    val j = Str("a\u{1}b\u{1f}c")
+
+    assert_eq(str(j), "\"a\\u0001b\\u001fc\"")
+    assert(value_of(str(j)) == j, "and reads back the same")
+
+@test
+pretty_is_for_a_person()
+    val j = value_of("{\"name\":\"sysl\",\"tags\":[\"systems\",\"small\"],\"n\":1}")
+
+    same(pretty(j, 2),
+        "{\n" +
+        "  \"name\": \"sysl\",\n" +
+        "  \"tags\": [\n" +
+        "    \"systems\",\n" +
+        "    \"small\"\n" +
+        "  ],\n" +
+        "  \"n\": 1\n" +
+        "}",
+        "the layout a person reads")
+end pretty_is_for_a_person
+
+@test
+pretty_leaves_an_empty_collection_on_one_line()
+    assert_eq(pretty(value_of("{\"a\":[],\"b\":{}}"), 2), "{\n  \"a\": [],\n  \"b\": {}\n}")
+    assert_eq(pretty(value_of("[]"), 2), "[]")
+    assert_eq(pretty(Int(1), 2), "1")
+
+@test
+pretty_reads_back_as_the_same_document()
+    val j = value_of("{\"a\":[1,{\"b\":[true,null]}],\"c\":\"x\"}")
+
+    assert(value_of(pretty(j, 4)) == j, "the layout is whitespace and nothing else")
+
+// -- building -------------------------------------------------------------------------------------
+
+@test
+an_object_is_built_a_member_at_a_time()
+    var o = object_builder()
+
+    o.put_str("name", "sysl")
+    o.put_int("port", 8080)
+    o.put_bool("tls", true)
+    o.put_real("load", 0.25)
+    o.put_null("parent")
+
+    var tags = array_builder()
+
+    tags.push_str("systems")
+    tags.push(Int(3))
+
+    o.put("tags", tags.finish())
+
+    assert_eq(str(o.finish()),
+        "{\"name\":\"sysl\",\"port\":8080,\"tls\":true,\"load\":0.25,\"parent\":null,\"tags\":[\"systems\",3]}")
+end an_object_is_built_a_member_at_a_time
+
+@test
+a_builder_says_how_far_it_has_got()
+    var a = array_builder()
+
+    assert(a.is_empty(), "nothing in it yet")
+    a.push_null()
+    assert_eq(a.len(), 1)
+    assert(!a.is_empty(), "and now there is")
+    assert_eq(str(a.finish()), "[null]")
+end a_builder_says_how_far_it_has_got
+
+@test
+a_slice_becomes_an_array_with_no_builder()
+    assert_eq(str(array_of([Int(1), Int(2), Int(3)])), "[1,2,3]")
+    assert_eq(str(array_of_str(["a", "b"])), "[\"a\",\"b\"]")
+    assert_eq(str(array_of([])), "[]")
+
+// What a program that builds a document and reads it back is really claiming.
+@test
+what_is_built_reads_back_as_what_was_put_in()
+    var o = object_builder()
+
+    o.put_str("a", "x\"y")
+    o.put_int("b", -1)
+
+    val j = o.finish()
+
+    assert(value_of(str(j)) == j, "through the text and back")
+end what_is_built_reads_back_as_what_was_put_in
+
+// -- the message a person reads -------------------------------------------------------------------
+
+// The reason `parse` takes a `Source` and answers with a `Diagnostic`: the message points at the
+// place, quotes the line, and says what was there.
+@test
+an_error_renders_against_its_input()
+    val text = "{\n  \"a\": 1,\n  \"b\": @\n}\n"
+    val src = source_of("config.json", text)
+
+    parse(src) match
+        Ok(_) -> assert(false, "@ is not a value")
+        Err(d) ->
+            same(d.render(src),
+                "error: expected a value\n" +
+                " --> config.json:3:8\n" +
+                "  |\n" +
+                "3 |   \"b\": @\n" +
+                "  |        ^ found `@`\n" +
+                "  |\n" +
+                "  = note: a value is a number, a string, `true`, `false`, `null`, an array or an object\n",
+                "the message a person reads")
+end an_error_renders_against_its_input
+
+@test
+an_error_names_where_the_bracket_opened()
+    val text = "[\n  1\n  2\n]\n"
+    val src = source_of("t.json", text)
+
+    parse(src) match
+        Ok(_) -> assert(false, "a comma is missing")
+        Err(d) ->
+            same(d.render(src),
+                "error: expected `,` or `]`\n" +
+                " --> t.json:3:3\n" +
+                "  |\n" +
+                "3 |   2\n" +
+                "  |   ^ found `2`\n" +
+                "  |\n" +
+                "  = note: the array opened at 1:1\n",
+                "the message a person reads")
+end an_error_names_where_the_bracket_opened
+
+// -- what the probing turned up -------------------------------------------------------------------
+
+// `str(x)` is `%g` at six significant digits, which would write a third as `0.333333` -- a different
+// number. These are the values that say the shortest-round-trip rule is doing its job.
+@test
+a_float_is_written_as_the_shortest_text_that_reads_back()
+    assert_eq(str(Real(0.1)), "0.1")
+    assert_eq(str(Real(1.0 / 3.0)), "0.3333333333333333")
+    assert_eq(str(Real(1.0e300)), "1e+300")
+    assert_eq(str(Real(0.0)), "0.0")
+    assert_eq(str(Real(-0.0)), "-0.0")
+    assert(value_of(str(Real(1.0 / 3.0))).as_real() == Some(1.0 / 3.0), "and it reads back exactly")
+end a_float_is_written_as_the_shortest_text_that_reads_back
+
+// The two numeric variants are only worth having if a round trip keeps them apart, which is what the
+// trailing `.0` is for.
+@test
+a_float_with_no_fraction_keeps_its_point()
+    assert_eq(str(Real(1.0)), "1.0")
+    assert_eq(str(Real(-2.0)), "-2.0")
+    assert(value_of(str(Real(1.0))).as_int() == None, "so it does not read back as an integer")
+    assert_eq(shown("1E+2"), "100.0")
+
+// JSON's grammar has no spelling for either, so there is nothing to write. `null` is what
+// JavaScript's own `JSON.stringify` writes, and a legal document can produce one by overflowing.
+@test
+a_number_with_no_finite_value_is_written_null()
+    assert_eq(shown("1e400"), "null")
+    assert_eq(shown("-1e400"), "null")
+    assert_eq(shown("1e-400"), "0.0")
+
+// JSON's whitespace is four bytes, and C's `isspace` takes six.
+@test
+whitespace_is_the_four_bytes_json_names()
+    assert_eq(shown("[1,\u{9}2,\u{a}3,\u{d}4]"), "[1,2,3,4]")
+    assert_eq(shown("[\u{c}1]"), "error: expected a value")
+    assert_eq(shown("[\u{b}1]"), "error: expected a value")
+    assert_eq(shown("[\u{a0}1]"), "error: expected a value")
+
+// `read_number` leaves a `.` or an `e` with nothing after it where it found it, and saying so beats
+// reporting trailing input from two characters further on.
+@test
+a_truncated_number_says_what_is_missing()
+    assert_eq(shown("1."), "error: a number needs a digit after its decimal point")
+    assert_eq(shown("1e"), "error: a number needs digits after its exponent")
+    assert_eq(shown("1E+"), "error: a number needs digits after its exponent")
+    assert_eq(shown("1.5.2"), "error: expected the end of the input")
+
+@test
+a_number_has_no_leading_sign_or_bare_point()
+    assert_eq(shown("+1"), "error: expected a value")
+    assert_eq(shown(".5"), "error: expected a value")
+    assert_eq(shown("-"), "error: no digits")
+    assert_eq(shown("[NaN]"), "error: expected a value")
+
+// A `Source` may be made over arbitrary bytes, and JSON is UTF-8 by definition -- so the one place a
+// document can hold something that is not text is inside a string, and that is where it is caught.
+@test
+a_string_that_is_not_utf8_is_refused()
+    var bytes: Buf[u8] = buf()
+
+    bytes.extend("[\"a".bytes)
+    bytes.push(255)
+    bytes.extend("\"]".bytes)
+
+    parse(source("t.json", bytes.view())) match
+        Ok(_) -> assert(false, "255 is not part of any character")
+        Err(d) -> assert_eq(d.message, "this string is not UTF-8")
+end a_string_that_is_not_utf8_is_refused
+
+@test
+a_control_character_inside_a_string_is_refused()
+    assert_eq(shown("[\"a\u{0}b\"]"), "error: a control character has to be escaped inside a string")
+    assert_eq(shown("\"a\tb\""), "error: a control character has to be escaped inside a string")
+    assert_eq(value_of("\"a\u{7f}b\"").as_str(), Some("a\u{7f}b"))
+
+@test
+a_lone_surrogate_is_not_a_character()
+    assert_eq(shown("\"\\ud83d\""), "error: not a character")
+    assert_eq(shown("\"\\ude00\""), "error: not a character")
+
+@test
+a_bracket_that_never_closes_says_where_it_opened()
+    assert_eq(shown("{\"a\":1"), "error: expected `,` or `}`")
+    assert_eq(shown("[1"), "error: expected `,` or `]`")
+    assert_eq(shown("   "), "error: expected a value")
+
+// A name is a JSON string like any other, so it may be empty and it may hold escapes -- and it is
+// written back out escaped the same way.
+@test
+a_name_is_a_string_like_any_other()
+    assert_eq(shown("{\"\":1}"), "{\"\":1}")
+    assert_eq(shown("{\"a\\nb\":1}"), "{\"a\\nb\":1}")
+    assert_eq(value_of("{\"a\\nb\":1}").member(0).unwrap().key, "a\nb")
+
+// `\/` is a JSON escape and `/` needs no escaping, so a round trip is the value and not the text.
+@test
+the_solidus_escape_is_read_and_not_written_back()
+    assert_eq(value_of("\"\\/\"").as_str(), Some("/"))
+    assert_eq(shown("\"\\/\""), "\"/\"")
+
+@test
+pretty_with_no_step_still_puts_one_thing_on_a_line()
+    assert_eq(pretty(value_of("{\"a\":[1]}"), 0), "{\n\"a\": [\n1\n]\n}")
+
+@test
+an_array_can_be_made_from_a_buffers_view()
+    var b: Buf[Json] = buf()
+
+    b.push(Int(1))
+    b.push(Str("x"))
+
+    assert_eq(str(array_of(b.view())), "[1,\"x\"]")
+end an_array_can_be_made_from_a_buffers_view
+
+// The README's two examples, so that the page cannot drift from what the package does.
+@test
+the_readme_examples_do_what_they_say()
+    val src = source_of("config.json", "{\"port\": 8080, \"tls\": true, \"tags\": [\"a\", \"b\"]}")
+    val doc = parse(src).unwrap()
+
+    assert_eq(doc.get("port").unwrap().as_int(), Some(8080))
+    assert_eq(doc.get("tags").unwrap().len(), 2)
+    assert(doc.get("missing") == None, "nothing under that name")
+    assert_eq(str(doc), "{\"port\":8080,\"tls\":true,\"tags\":[\"a\",\"b\"]}")
+
+    var o = object_builder()
+
+    o.put_str("name", "sysl")
+    o.put_int("port", 8080)
+    o.put_bool("tls", true)
+    o.put("tags", array_of_str(["systems", "small"]))
+
+    assert_eq(str(o.finish()),
+        "{\"name\":\"sysl\",\"port\":8080,\"tls\":true,\"tags\":[\"systems\",\"small\"]}")
+
+    same(pretty(doc, 2),
+        "{\n" +
+        "  \"port\": 8080,\n" +
+        "  \"tls\": true,\n" +
+        "  \"tags\": [\n" +
+        "    \"a\",\n" +
+        "    \"b\"\n" +
+        "  ]\n" +
+        "}",
+        "the page's laid-out form")
+end the_readme_examples_do_what_they_say
