@@ -46,7 +46,7 @@ const max_depth: usize = 128
  * reader for documents rather than for a stream of them.
  */
 parse(src: Source) -> Result[Json, Diagnostic]
-    var p = Parser(src, scan(src), 0)
+    var p = Parser(src, scan(src), 0, sets())
     val v = value(&p)?
 
     ws(&p)
@@ -59,19 +59,39 @@ parse(src: Source) -> Result[Json, Diagnostic]
     Ok(v)
 end parse
 
-// The reader is a cursor, the input it came from for the messages, and how deep it is. There is no
-// other state: everything a recursive-descent parser knows is in its own recursion.
+// The reader is a cursor, the input it came from for the messages, how deep it is, and the two byte
+// tables the grammar narrows with. There is no other state: everything a recursive-descent parser
+// knows is in its own recursion.
 private[json] struct Parser
     src: Source
     s: Scanner
     depth: usize
 
-// JSON's whitespace is four bytes where `skip_space` takes six: a form feed and a vertical tab are
-// space to C's `isspace` and are not space in JSON. Same narrowing as the escapes and the numbers
-// get, in the same place and for the same reason.
-private val json_space: ByteSet = byte_set_of(" \t\n\r")
+    // File-private, because `Sets` is: nothing outside this file has a use for either.
+    private sets: Sets
 
-private ws(p: *Parser) -> usize = p.s.accept_while_set(json_space)
+// Two of the three places JSON is narrower than the readers underneath it, as tables rather than as
+// chains of comparisons -- one shift-and-test per byte, where a `||` chain is a branch per byte of
+// every string and every run of blanks. `space` is JSON's whitespace, which is four bytes where
+// `skip_space` takes six: a form feed and a vertical tab are space to C's `isspace` and are not space
+// in JSON. `escapes` is the eight the byte after a backslash may be, checked before `read_escape` --
+// which knows fifteen -- is trusted with it. The third narrowing is the number, and it is a test on
+// the text afterwards rather than a table.
+//
+// **THEY ARE FIELDS ON THE PARSER RATHER THAN MODULE-LEVEL `val`s, WHICH IS NOT A STYLE CHOICE.** A
+// module-level binding is *module storage*, filled by an initializer before a program's statements
+// run -- and a `build-c` archive for a freestanding target has no entry point and no loader to run
+// one, so an `@export("main")` reaching one is refused outright. That is every board a program might
+// read a configuration file on. `private const` is not the way out either: `byte_set_of(...)` is a
+// call, and a call is "not a constant expression". So they are built once per `parse` instead, which
+// is twenty-two iterations of a shift-and-or against a parse that walks the whole document.
+private struct Sets
+    space: ByteSet
+    escapes: ByteSet
+
+private sets() -> Sets = Sets(byte_set_of(" \t\n\r"), byte_set_of("\"\\/bfnrtu"))
+
+private ws(p: *Parser) -> usize = p.s.accept_while_set(p.sets.space)
 
 private[json] value(p: *Parser) -> Result[Json, Diagnostic]
     ws(p)
@@ -174,10 +194,6 @@ private whole(v: ulong, negative: bool) -> Json
         Int(if negative then -long(v) else long(v))
 end whole
 
-// JSON has eight escapes and `read_escape` knows fifteen, so the byte after the backslash is checked
-// here before the shared reader is trusted with it.
-private val escapes: ByteSet = byte_set_of("\"\\/bfnrtu")
-
 // A quoted string, decoded.
 //
 // **Nothing here decodes a character, and that is the point.** The bytes between one escape and the
@@ -213,7 +229,7 @@ private read_text(p: *Parser) -> Result[string, Diagnostic]
 
                     val at = p.s.offset
                     val known = p.s.peek_at(1) match
-                        Some(e) -> escapes.has(e)
+                        Some(e) -> p.sets.escapes.has(e)
                         None -> false
 
                     if !known then

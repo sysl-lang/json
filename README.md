@@ -31,7 +31,7 @@ Name it in your project's `package.hocon` and `sysl build` fetches it:
 
 ```hocon
 dependencies {
-  json { git = "github.com/sysl-lang/json", version = "0.1.0" }
+  json { git = "github.com/sysl-lang/json", version = "0.1.1" }
 }
 ```
 
@@ -160,6 +160,22 @@ done at the call rather than by a flag on the reader, so that a second grammar c
   of them, so the text it consumed is examined afterwards.
 * **Whitespace.** JSON names four bytes and C's `isspace` takes six — a form feed and a vertical tab
   are not whitespace here.
+
+## Where it runs
+
+**A board is in scope, and it is checked by building rather than by reading.** The package holds no
+module-level storage: the two byte tables the grammar narrows with are fields on the reader, built
+once per `parse`, because a module-level binding is filled by an initializer and a `build-c` archive
+for a freestanding target has neither an entry point nor a loader to run one. An `@export("main")`
+that reached one would be refused outright.
+
+```
+sysl build-c <program dir> --target thumb-freestanding-softfp
+```
+
+What it still asks for is a heap — `requires { heap = true }` — because a document's size is not
+known until it has been read. So this is JSON on a board that already links an allocator, which is
+the ordinary case: the Pico SDK carries newlib, as do FreeRTOS and Zephyr applications.
 
 ## What is deliberately not here
 

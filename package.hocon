@@ -8,7 +8,7 @@
 // This is the block a consumer writes to reach it:
 //
 //     dependencies {
-//       json { git = "github.com/sysl-lang/json", version = "0.1.0" }
+//       json { git = "github.com/sysl-lang/json", version = "0.1.1" }
 //     }
 //
 // The coordinate names the package, `json`; the module a program imports is `sh.sysl.json`. Naming
@@ -17,7 +17,7 @@
 
 package {
   name    = "json"
-  version = "0.1.0"
+  version = "0.1.1"
 
   // **The oldest compiler this builds with, and the reason is one declaration.** `Obj(members:
   // Buf[Member])` over a named `struct Member` holding a `Json` is a cycle that passes through
