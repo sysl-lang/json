@@ -29,7 +29,7 @@ package {
   // a `value` is what a caller walking an object reads, and the shapes an older compiler does
   // accept -- a tuple with no field names, or two buffers a caller keeps in step -- are public
   // payloads that could not be walked back later without breaking every consumer.
-  sysl = "0.0.79"
+  sysl = "0.0.88"
 }
 
 dependencies {

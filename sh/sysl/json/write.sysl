@@ -2,7 +2,7 @@ module sh.sysl.json
 
 import sysl.buf.byte_sink
 import sysl.math.Float
-import sysl.text.{StrBuilder, from_utf8, parse_real, str_builder}
+import sysl.text.{StrBuilder, from_utf8, str_builder}
 
 // Writing, which is the half of a JSON package that a reader alone cannot do: a program that reads a
 // document, changes one member and writes it back needs both, and a program that builds a request
@@ -72,9 +72,13 @@ private write_number[T: Display](out: *Writer, v: T) = v.display(out, FormatSpec
 // every float at seventeen digits instead is exact and unreadable: `0.1` becomes
 // `0.10000000000000001`.
 //
-// So this asks for fifteen, sixteen and seventeen digits in turn and takes the first that reads back
-// as the value it started with. That is the standard shortest-round-trip rule, and it is why `0.1`
-// stays `0.1` while a third gets the digits it needs.
+// So this asks the library for the shortest rendering that reads back equal, which is the standard
+// shortest-round-trip rule -- and is why `0.1` stays `0.1` while a third gets the digits it needs.
+//
+// **`sysl.display_real_shortest` is that rule, as of 0.0.88**, and this package hand-rolled it until
+// then: a loop over fifteen, sixteen and seventeen significant digits, rendering each and parsing it
+// back. The loop was right and it was also the fourth copy of it in the org, which is what a standard
+// library is for. What stays here is the two things that are JSON's rather than the number's.
 //
 // **A float with no fraction gets a `.0`**, so that `Real(1.0)` does not render as `1` and read back
 // as `Int(1)`. The two numeric variants are only worth having if a round trip keeps them apart.
@@ -87,23 +91,12 @@ private write_number[T: Display](out: *Writer, v: T) = v.display(out, FormatSpec
 private real_text(x: real) -> string
     if !x.is_finite() then return "null"
 
-    for digits in 15..<18
-        val t = rendered(x, digits)
-
-        val exact = parse_real(t.bytes) match
-            Ok(back) -> back == x
-            Err(_) -> false
-
-        if exact then return with_point(t)
-
-    with_point(rendered(x, 17))
-end real_text
-
-private rendered(x: real, digits: int) -> string
     var sink = byte_sink()
 
-    display_real(x, &sink, FormatSpec(0, digits, false))
-    from_utf8(sink.text()).unwrap()
+    display_real_shortest(x, &sink, FormatSpec(0, -1, false))
+
+    with_point(from_utf8(sink.text()).unwrap())
+end real_text
 
 // `1` is an integer to a JSON reader and `1.0` is not, so a rendering with neither a point nor an
 // exponent in it gets one.
