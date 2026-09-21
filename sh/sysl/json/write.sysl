@@ -33,6 +33,10 @@ private compact(j: Json, out: *Writer)
         Null -> out.write("null".bytes)
         Bool(b) -> out.write(if b then "true".bytes else "false".bytes)
         Int(n) -> write_number(out, n)
+        // The digits go out as they came in, with no quotes around them: a number too large for a
+        // `long` is still a number, and writing it as a string would be this package changing what
+        // the document says.
+        Big(d) -> out.write(d.bytes)
         Real(x) -> out.write(real_text(x).bytes)
         Str(s) -> quote(s, out)
         Arr(items) ->

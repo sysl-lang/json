@@ -31,7 +31,7 @@ Name it in your project's `package.hocon` and `sysl build` fetches it:
 
 ```hocon
 dependencies {
-  json { git = "github.com/sysl-lang/json", version = "0.1.1" }
+  json { git = "github.com/sysl-lang/json", version = "0.2.0" }
 }
 ```
 
@@ -78,18 +78,46 @@ enum Json
     Null
     Bool(b: bool)
     Int(n: long)
+    Big(digits: string)
     Real(x: real)
     Str(s: string)
     Arr(items: Buf[Json])
     Obj(members: Buf[Member])
 ```
 
-**Numbers are two variants rather than one.** JSON's grammar has a single numeric production and says
-nothing about storage, so a reader has to choose and either choice alone is wrong for somebody:
+**Numbers are three variants rather than one.** JSON's grammar has a single numeric production and
+says nothing about storage, so a reader has to choose and no one choice is right for everybody:
 carrying everything as a `real` loses the exact value of an integer past 2⁵³, which is where an
 identifier or a millisecond timestamp lives, and carrying everything as a `long` cannot represent
-`0.5`. A number with no fraction and no exponent is an `Int`, everything else is a `Real`, and a
-caller that does not care asks `as_real`.
+`0.5` — nor `10³⁰`, which a program whose integers are arbitrary precision writes without thinking
+about it and every JavaScript host reads back. A whole number that fits a `long` is an `Int`,
+anything written with a fraction or an exponent is a `Real`, a whole number past a `long` in either
+direction is a `Big`, and a caller that does not care asks `as_real`.
+
+**A `Big` carries the digits rather than a `BigInt`**, because a document is text and what this
+package owes is the text back: the digits round-trip exactly, cost one string, and ask nothing of a
+consumer that is only moving a number from one document to another.
+
+```sysl
+val doc = parse(source_of("t.json", "{\"id\": 123456789012345678901234567890}")).unwrap()
+
+print(doc.get("id").unwrap().as_big().unwrap())
+print(to_string(to_bigint(doc.get("id").unwrap()).unwrap() + from_int(1)))
+print(str(from_bigint(pow(from_int(10), 30))))
+```
+
+```
+123456789012345678901234567890
+123456789012345678901234567891
+1000000000000000000000000000000
+```
+
+`to_bigint` takes an `Int` as readily as a `Big`, and `from_bigint` answers whichever variant the
+reader would have: an `Int` where a `long` holds the value, the digits where one does not. That rule
+is the reason to call it rather than to write `Big(to_string(v))` — a `Big` holding a small number
+renders as that number and reads back as an `Int`, so a document built that way would not equal
+itself after a round trip. The two are the only place `sysl.math.bigint` is reached, so a program
+that only reads a configuration file never pays for it.
 
 **A document keeps the order it was written in.** Members are a sequence rather than a map, so
 `{"b":1,"a":2}` renders back the way it arrived, `get` is a linear scan, and a repeated name keeps
@@ -97,8 +125,10 @@ both copies with the first winning. That is the only representation that can rou
 what a reader and a writer in one package are for.
 
 `is_null`, `is_bool`, `is_number`, `is_str`, `is_array` and `is_object` ask what a value is;
-`as_bool`, `as_int`, `as_real` and `as_str` take it out. The `as_*` family never converts: a string
-reading `"true"` is a string, and `Str("1").as_int()` is `None`. `get(name)`, `at(index)`,
+`as_bool`, `as_int`, `as_big`, `as_real` and `as_str` take it out. The `as_*` family never
+converts: a string reading `"true"` is a string, and `Str("1").as_int()` is `None`. A number too
+large for a `long` answers `None` from `as_int` and its digits from `as_big`, for the same reason:
+what the document wrote is what it gets back. `get(name)`, `at(index)`,
 `member(index)` and `len()` reach inside, and each answers `None` — or zero — for a shape that has
 none, so an accessor chain is safe to write against a document nobody has checked yet.
 

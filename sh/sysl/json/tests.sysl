@@ -3,6 +3,8 @@ module sh.sysl.json
 
 import sh.sysl.parsing.{Diagnostic, Source, source, source_of}
 import sysl.buf.{Buf, buf}
+import sysl.math.Float
+import sysl.math.bigint.{from_int, pow, to_string}
 import sysl.text.str_builder
 
 // What this package claims, run by `sysl test .`.
@@ -66,7 +68,7 @@ values_nest_and_the_tree_owns_itself()
     assert_eq(shown("{\"a\":{\"b\":[1,2]}}"), "{\"a\":{\"b\":[1,2]}}")
     assert_eq(shown("[{\"a\":[{}]}]"), "[{\"a\":[{}]}]")
 
-// The claim the two numeric variants exist for: what the document wrote decides which one, and an
+// The claim the three numeric variants exist for: what the document wrote decides which one, and an
 // integer past a `real`'s exact range survives.
 @test
 a_number_keeps_the_shape_it_was_written_in()
@@ -80,14 +82,111 @@ a_number_keeps_the_shape_it_was_written_in()
         "past 2^53, which a reader with only floats cannot hold")
 end a_number_keeps_the_shape_it_was_written_in
 
-// An integer larger than a `long` is legal JSON, so it is answered rather than refused -- as a
-// `Real`, which is what a reader with only floats does to every number.
+// An integer larger than a `long` is legal JSON -- every JavaScript host reads one -- so it is
+// answered rather than refused, and answered exactly: the digits are what the document said.
 @test
-an_integer_too_large_for_a_long_reads_as_a_real()
+an_integer_too_large_for_a_long_keeps_its_digits()
     assert(value_of("9223372036854775807").as_int() == Some(9223372036854775807), "the largest long")
+    assert(value_of("9223372036854775807").as_big() == None, "which is an Int, not a Big")
     assert(value_of("9223372036854775808").as_int() == None, "one past it is not an Int")
-    assert(value_of("9223372036854775808").as_real().is_some(), "it is a Real")
+    assert_eq(value_of("9223372036854775808").as_big(), Some("9223372036854775808"))
+    assert(value_of("9223372036854775808").is_number(), "and it is still a number")
     assert_eq(shown("-9223372036854775807"), "-9223372036854775807")
+end an_integer_too_large_for_a_long_keeps_its_digits
+
+// The magnitude the reader takes back: `long`'s most negative value is one further from zero than
+// its largest, so the accumulator holding 2^63 with a `-` in front of it fits after all.
+@test
+the_most_negative_long_is_an_int_and_the_one_past_it_is_not()
+    assert(value_of("-9223372036854775808").as_int() == Some(-9223372036854775807 - 1),
+        "2^63 negated is a long")
+    assert(value_of("-9223372036854775808").as_big() == None, "so it is not carried as digits")
+    assert_eq(value_of("-9223372036854775809").as_big(), Some("-9223372036854775809"))
+    assert_eq(shown("-9223372036854775809"), "-9223372036854775809")
+end the_most_negative_long_is_an_int_and_the_one_past_it_is_not
+
+// The sizes this variant exists for: past a `ulong` as well as past a `long`, in both signs, read
+// and written back byte for byte.
+@test
+a_number_of_any_length_round_trips()
+    assert_eq(shown("123456789012345678901234567890"), "123456789012345678901234567890")
+    assert_eq(shown("-123456789012345678901234567890"), "-123456789012345678901234567890")
+    assert_eq(shown("18446744073709551615"), "18446744073709551615")
+    assert_eq(shown("18446744073709551616"), "18446744073709551616")
+    assert_eq(shown("[1,99999999999999999999,2]"), "[1,99999999999999999999,2]")
+    assert_eq(shown("{\"id\":9007199254740993000000000}"), "{\"id\":9007199254740993000000000}")
+    assert_eq(pretty(value_of("[10000000000000000000]"), 0), "[\n10000000000000000000\n]")
+end a_number_of_any_length_round_trips
+
+// There is no length at which the reader gives up, so there is one at which `as_real` runs out of
+// exponent -- and it answers the infinity, which is the same answer `1e400` gives and which the
+// writer writes `null`. The digits themselves are untouched by any of that.
+@test
+a_big_past_every_finite_real_still_reads_and_still_widens()
+    var b = str_builder()
+
+    b.push("1")
+
+    for _ in 0..<400 do b.push("0")
+
+    val huge = b.finish()
+
+    assert_eq(shown(huge), huge)
+    assert(!value_of(huge).as_real().expect("a number").is_finite(), "past every finite real")
+    assert(to_bigint(value_of(huge)).is_some(), "while the value itself is exact")
+end a_big_past_every_finite_real_still_reads_and_still_widens
+
+// A fraction or an exponent is a `Real` however large the value, which is the line the reader drew
+// before this variant existed and did not move: `1e30` is a float's way of writing a number and
+// `1000000000000000000000000000000` is not.
+@test
+a_large_number_written_as_a_float_is_still_a_real()
+    assert_eq(shown("1e30"), "1e+30")
+    assert(value_of("1e30").as_big() == None, "an exponent is a Real, however large")
+    assert(value_of("1e30").as_int() == None, "and not an Int either")
+    assert(value_of("1000000000000000000000000000000").as_real() == Some(1.0e30),
+        "a Big widens on request, rounded the way every reader with only floats rounds")
+end a_large_number_written_as_a_float_is_still_a_real
+
+// Equality is about two documents saying the same thing, so it reaches the digits and stops at the
+// variant boundary -- the same answer the `Int`/`Real` split has always given.
+@test
+two_large_numbers_are_equal_when_their_digits_are()
+    assert(value_of("10000000000000000000") == value_of("10000000000000000000"), "the same digits")
+    assert(value_of("10000000000000000000") != value_of("10000000000000000001"), "and not others")
+    assert(value_of("10000000000000000000") != value_of("1.0e19"), "a Big is not a Real")
+    assert(value_of("1") != value_of("1.0"), "as an Int is not a Real")
+
+// The three narrowings are about the shape of the run, so they are answered before its size is: a
+// number that overflows AND has an underscore in it is refused for the underscore.
+@test
+the_narrowing_comes_before_the_overflow()
+    assert_eq(shown("123456789012345678901_234"), "error: a number may not have underscores in it")
+    assert_eq(shown("0123456789012345678901234"), "error: a number may not have a leading zero")
+    assert_eq(shown("0xffffffffffffffffff"), "error: a number may not have a radix prefix")
+    assert_eq(shown("123456789012345678901234567890."),
+        "error: a number needs a digit after its decimal point")
+end the_narrowing_comes_before_the_overflow
+
+// The bridge to arbitrary precision, which is where a consumer that has to compute with one of
+// these goes -- and the constructor that keeps a hand-built document agreeing with a read one.
+@test
+a_large_number_converts_to_and_from_a_bigint()
+    val doc = value_of("{\"id\": 123456789012345678901234567890}")
+    val big = to_bigint(doc.get("id").unwrap()).expect("a number")
+
+    assert_eq(doc.get("id").unwrap().as_big(), Some("123456789012345678901234567890"))
+    assert_eq(to_string(big), "123456789012345678901234567890")
+    assert_eq(to_string(big + from_int(1)), "123456789012345678901234567891")
+    assert_eq(to_string(to_bigint(value_of("-7")).expect("an Int converts too")), "-7")
+    assert(to_bigint(value_of("1.5")) == None, "a Real does not")
+    assert(to_bigint(value_of("\"12\"")) == None, "and neither does a string of digits")
+    assert_eq(str(from_bigint(pow(from_int(10), 30))), "1000000000000000000000000000000")
+    assert_eq(str(from_bigint(from_int(5))), "5")
+    assert(from_bigint(from_int(5)).as_int() == Some(5), "which fits, so it is an Int")
+    assert(from_bigint(pow(from_int(10), 30)) == value_of("1000000000000000000000000000000"),
+        "and a built document equals a read one")
+end a_large_number_converts_to_and_from_a_bigint
 
 @test
 escapes_decode_and_surrogates_pair()

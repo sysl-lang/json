@@ -1,6 +1,7 @@
 module sh.sysl.json
 
 import sysl.buf.{Buf, buf}
+import sysl.text.parse_real
 
 // The value, and the two things a caller does with one that a `match` does not do well: ask what it
 // is, and reach into it by name or by position.
@@ -27,19 +28,33 @@ struct Member
     key: string
     value: Json
 
-/** A JSON value: one of the seven things the grammar can produce.
+/** A JSON value: one of the eight things the grammar can produce.
  *
- * **Numbers are two variants rather than one.** JSON's grammar has a single numeric production and
- * says nothing about how it is stored, so a reader has to choose, and either choice alone is wrong
- * for somebody: carrying every number as a `real` loses the exact value of an integer past 2^53,
- * which is where an identifier or a timestamp in milliseconds lives, and carrying every number as a
- * `long` cannot represent `0.5` at all. So `Int` is what a number with no fraction and no exponent
- * reads as, `Real` is everything else, and a caller that does not care asks `as_real`.
+ * **Numbers are three variants rather than one.** JSON's grammar has a single numeric production and
+ * says nothing about how it is stored, so a reader has to choose, and no one choice is right for
+ * everybody: carrying every number as a `real` loses the exact value of an integer past 2^53, which
+ * is where an identifier or a timestamp in milliseconds lives, and carrying every number as a `long`
+ * cannot represent `0.5` at all -- nor `10^30`, which a program whose integers are arbitrary
+ * precision writes without thinking about it and every JavaScript host reads back. So `Int` is a
+ * whole number that fits a `long`, `Real` is anything written with a fraction or an exponent, `Big`
+ * is a whole number past what a `long` holds in either direction, and a caller that does not care
+ * asks `as_real`.
+ *
+ * **`Big` carries the digits rather than a `BigInt`**, because a document is text and what this
+ * package owes is the text back: the digits round-trip exactly, cost one string, and ask nothing of
+ * a consumer that is only moving a number from one document to another. A consumer that has to
+ * *compute* with one calls `to_bigint` and pays for the conversion where it asked for it, which is
+ * what keeps `sysl.math.bigint` out of every program that only reads a configuration file.
+ *
+ * **The reader never answers `Big` where a `long` would hold the value**, and nothing else should
+ * either: `Big("5")` renders as `5` and reads back as `Int(5)`, so a document built that way does
+ * not equal itself after a round trip. `from_bigint` is the constructor that keeps the rule.
  */
 enum Json
     Null
     Bool(b: bool)
     Int(n: long)
+    Big(digits: string)
     Real(x: real)
     Str(s: string)
     Arr(items: Buf[Json])
@@ -57,6 +72,7 @@ enum Json
 
     is_number(self) -> bool = self match
         Int(_) -> true
+        Big(_) -> true
         Real(_) -> true
         _ -> false
 
@@ -80,24 +96,40 @@ enum Json
         Bool(b) -> Some(b)
         _ -> None
 
-    /** The integer this is -- only where the document wrote one. `1.0` was written with a fraction,
-     * so it is a `Real` and this answers `None`; the caller that would take either asks `as_real`.
+    /** The integer this is -- only where the document wrote one that fits. `1.0` was written with a
+     * fraction, so it is a `Real` and this answers `None`, and so is a whole number past a `long`,
+     * which is a `Big`. The caller that would take any of them asks `as_real`, and the caller that
+     * wants the exact value of a large one asks `to_bigint`.
      */
     as_int(self) -> Option[long] = self match
         Int(n) -> Some(n)
         _ -> None
 
+    /** The digits of a whole number too large for a `long`, exactly as the document wrote them and
+     * with the sign where it wrote it. `None` for every other shape, an `Int` included: a caller
+     * reaching for this is asking for what `as_int` could not answer.
+     */
+    as_big(self) -> Option[string] = self match
+        Big(d) -> Some(d)
+        _ -> None
+
     /** The number this is, whichever variant carries it.
      *
-     * **This is the one accessor that widens**, because the split between the two numeric variants
-     * is about not losing what the document said, and a caller doing arithmetic in floating point
-     * has already decided it does not care. Every `long` up to 2^53 widens exactly; past that the
+     * **This is the one accessor that widens**, because the split between the numeric variants is
+     * about not losing what the document said, and a caller doing arithmetic in floating point has
+     * already decided it does not care. Every `long` up to 2^53 widens exactly; past that the
      * conversion rounds, which is the same thing every JSON reader that has only floats does to
-     * every number.
+     * every number -- and a `Big` is that same rounding of its digits, correctly rounded however
+     * many of them there are, to an infinity where they name a value past every finite `real`. The
+     * `None` is for the digits a reader cannot produce, a hand-built `Big` holding something that
+     * is not a number.
      */
     as_real(self) -> Option[real] = self match
         Real(x) -> Some(x)
         Int(n) -> Some(real(n))
+        Big(d) -> parse_real(d) match
+            Ok(x) -> Some(x)
+            Err(_) -> None
         _ -> None
 
     as_str(self) -> Option[string] = self match
@@ -156,11 +188,17 @@ impl Eq for Member
 
 /** Two values are equal when they are the same shape holding equal things.
  *
- * **The two numeric variants do not meet**, so `Int(1)` and `Real(1.0)` are not equal. That reads
- * oddly beside `1 == 1.0` in the language and it is the only defensible answer here: this equality
- * is about two *documents* saying the same thing, and `1` and `1.0` are two different texts that a
+ * **The numeric variants do not meet**, so `Int(1)` and `Real(1.0)` are not equal. That reads oddly
+ * beside `1 == 1.0` in the language and it is the only defensible answer here: this equality is
+ * about two *documents* saying the same thing, and `1` and `1.0` are two different texts that a
  * round trip has to keep apart. A caller comparing numbers regardless of how they were written has
  * `as_real` and the language's own `==`.
+ *
+ * **Two `Big`s are equal when their digits are**, which is the same rule one step further along: a
+ * value the reader produced is the text the document held, and the grammar has already refused a
+ * leading zero and a leading `+`, so the digits of two documents agreeing on a number agree
+ * byte for byte. A caller comparing a hand-built `Big` against a read one compares it through
+ * `to_bigint`.
  *
  * **Objects compare in order.** `{"a":1,"b":2}` and `{"b":2,"a":1}` are not equal, for the same
  * reason: what is held is the sequence the document wrote, and a reordering is a different text.
@@ -174,6 +212,9 @@ impl Eq for Json
                 _ -> false
             Int(a) -> rhs match
                 Int(b) -> a == b
+                _ -> false
+            Big(a) -> rhs match
+                Big(b) -> a == b
                 _ -> false
             Real(a) -> rhs match
                 Real(b) -> a == b

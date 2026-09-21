@@ -8,7 +8,7 @@
 // This is the block a consumer writes to reach it:
 //
 //     dependencies {
-//       json { git = "github.com/sysl-lang/json", version = "0.1.1" }
+//       json { git = "github.com/sysl-lang/json", version = "0.2.0" }
 //     }
 //
 // The coordinate names the package, `json`; the module a program imports is `sh.sysl.json`. Naming
@@ -17,19 +17,23 @@
 
 package {
   name    = "json"
-  version = "0.1.1"
+  version = "0.2.0"
 
-  // **The oldest compiler this builds with, and the reason is one declaration.** `Obj(members:
-  // Buf[Member])` over a named `struct Member` holding a `Json` is a cycle that passes through
-  // `Buf`'s `[]T`, and every compiler before this one refused it -- *"type 'Json' contains itself,
-  // so it has no finite size"* -- against a reference page saying the cycle is legal. Card `0268`
-  // fixed it, and until it did this package's central type could not be spelled.
+  // **The oldest compiler this builds with, and a library decides it now.** `sysl.math.bigint`
+  // arrived in 0.0.102, and `to_bigint` and `from_bigint` are what a consumer that has to compute
+  // with a number past a `long` reaches for. Nothing else here needs a compiler that new.
+  //
+  // **The floor before that was 0.0.88, and the reason is worth keeping because it is about the
+  // central type rather than about a library.** `Obj(members: Buf[Member])` over a named `struct
+  // Member` holding a `Json` is a cycle that passes through `Buf`'s `[]T`, and every compiler
+  // before 0.0.88 refused it -- *"type 'Json' contains itself, so it has no finite size"* --
+  // against a reference page saying the cycle is legal.
   //
   // **That is what the package is for as much as the reading is**: a named member with a `key` and
   // a `value` is what a caller walking an object reads, and the shapes an older compiler does
   // accept -- a tuple with no field names, or two buffers a caller keeps in step -- are public
   // payloads that could not be walked back later without breaking every consumer.
-  sysl = "0.0.88"
+  sysl = "0.0.102"
 }
 
 dependencies {

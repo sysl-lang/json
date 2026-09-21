@@ -3,7 +3,7 @@ module sh.sysl.json
 import sh.sysl.parsing.*
 import sysl.buf.{Buf, buf}
 import sysl.buf.byte_sink
-import sysl.text.from_utf8
+import sysl.text.{from_utf8, from_utf8_unchecked}
 
 // Reading, which is recursive descent over `sh.sysl.parsing`'s cursor.
 //
@@ -132,67 +132,93 @@ end word
 
 // JSON's numbers are a narrower shape than `read_number`'s, and the narrowing is three tests over
 // the text it consumed rather than three flags on the reader.
+//
+// **An overflow is one of the answers rather than one of the failures.** `read_number` refuses a run
+// of digits too long for a `ulong` -- and it refuses it having consumed the whole run, which is what
+// makes the refusal usable: the text is in the input where it always was, the cursor is past it, and
+// JSON's grammar was satisfied by every byte of it. So the reader takes the digits and the shape of
+// the document is unaffected by how large its numbers are. The three narrowings run first, because a
+// run with an underscore or a radix prefix in it is refused for that whether or not it also
+// overflowed.
 private number(p: *Parser) -> Result[Json, Diagnostic]
     val m = p.s.mark()
     val negative = p.s.accept(u8('-'))
+    val read = read_number(&p.s)
+    val span = p.s.span_from(m)
+    val run = p.src.text(span)
+    val digits = if negative then run[1..<run.len] else run
 
-    read_number(&p.s) match
+    for i in 0..<digits.len
+        if digits[i] == u8('_') then
+            return Err(error(span, "a number may not have underscores in it"))
+
+    if digits.len > 1 && digits[0] == u8('0') then
+        if is_digit(digits[1]) then
+            return Err(error(span, "a number may not have a leading zero"))
+
+        if digits[1] != u8('.') && digits[1] != u8('e') && digits[1] != u8('E') then
+            return Err(error(span, "a number may not have a radix prefix")
+                .with_note("JSON's numbers are decimal, so `0x10` is not sixteen"))
+
+    // `read_number` leaves a `.` or an `e` with nothing after it where it found it, so a number that
+    // came back whole with one of those next to it is a truncated fraction rather than a number
+    // followed by something else. Saying so beats "expected the end of the input", which is what the
+    // trailing check would otherwise report from two characters further on.
+    val truncated: Option[u8] = read match
+        Ok(Number.Real(_)) -> None
+        _ -> p.s.peek()
+
+    if truncated == Some(u8('.')) then
+        return Err(error(here(p), "a number needs a digit after its decimal point"))
+
+    if truncated == Some(u8('e')) || truncated == Some(u8('E')) then
+        return Err(error(here(p), "a number needs digits after its exponent"))
+
+    read match
+        Err(LitError.Overflow(_)) -> Ok(Big(text_of(p, span)))
         Err(e) -> Err(error(where(e), str(e)))
-        Ok(n) ->
-            val span = p.s.span_from(m)
-            val run = p.src.text(span)
-            val digits = if negative then run[1..<run.len] else run
-
-            for i in 0..<digits.len
-                if digits[i] == u8('_') then
-                    return Err(error(span, "a number may not have underscores in it"))
-
-            if digits.len > 1 && digits[0] == u8('0') then
-                if is_digit(digits[1]) then
-                    return Err(error(span, "a number may not have a leading zero"))
-
-                if digits[1] != u8('.') && digits[1] != u8('e') && digits[1] != u8('E') then
-                    return Err(error(span, "a number may not have a radix prefix")
-                        .with_note("JSON's numbers are decimal, so `0x10` is not sixteen"))
-
-            // `read_number` leaves a `.` or an `e` with nothing after it where it found it, so a
-            // number that came back whole with one of those next to it is a truncated fraction
-            // rather than a number followed by something else. Saying so beats "expected the end of
-            // the input", which is what the trailing check would otherwise report from two
-            // characters further on.
-            val truncated: Option[u8] = n match
-                Number.Int(_) -> p.s.peek()
-                Number.Real(_) -> None
-
-            if truncated == Some(u8('.')) then
-                return Err(error(here(p), "a number needs a digit after its decimal point"))
-
-            if truncated == Some(u8('e')) || truncated == Some(u8('E')) then
-                return Err(error(here(p), "a number needs digits after its exponent"))
-
-            Ok(n match
-                Number.Real(x) -> Real(if negative then -x else x)
-                Number.Int(v) -> whole(v, negative))
+        Ok(n) -> Ok(n match
+            Number.Real(x) -> Real(if negative then -x else x)
+            Number.Int(v) -> whole(p, span, v, negative))
 end number
 
 // The one byte the cursor is on, as a span -- which is what a diagnostic underlines when what is
 // wrong is a single character.
 private here(p: *Parser) -> Span = Span(p.s.offset, p.s.offset + 1)
 
-// An integer as the value it is, or as a float where it will not fit one.
+// An integer as the value it is, or as its digits where a `long` will not hold it.
 //
-// **The overflow is answered rather than refused**, because `12345678901234567890` is legal JSON and
-// a reader that stops on it cannot read a document another reader wrote. What it costs is the exact
-// value, which is precisely what every reader that has only floats costs every number -- and the two
-// variants exist so that this is the rare case instead of the usual one.
-private whole(v: ulong, negative: bool) -> Json
+// **A number past a `long` is answered exactly rather than rounded**, because `12345678901234567890`
+// is legal JSON, every JavaScript host reads it, and a document whose numbers are identifiers loses
+// the thing it was carrying if a reader rounds them. Rounding is still one call away -- `as_real`
+// does it on request -- and the variant is what makes that the caller's decision rather than the
+// reader's.
+//
+// **The most negative `long` is the one magnitude this takes back.** Its absolute value is one
+// larger than the largest positive, so the accumulator holding 2^63 with a `-` in front of it is an
+// `Int` and nothing is lost; the literal has to be written as a negation and a subtraction, since
+// 2^63 is not itself a `long`.
+private whole(p: *Parser, span: Span, v: ulong, negative: bool) -> Json
     val most: ulong = 9223372036854775807
 
-    if v > most then
-        Real(if negative then -real(v) else real(v))
-    else
+    if v <= most then
         Int(if negative then -long(v) else long(v))
+    elif negative && v == most + 1 then
+        Int(-9223372036854775807 - 1)
+    else
+        Big(text_of(p, span))
 end whole
+
+// The number's own text, copied out of the input.
+//
+// **The copy is the point.** A `Json` owns everything it holds -- that is what makes a document a
+// value rather than a view -- so a `Big` pointing into the `Source`'s bytes would be the one place
+// in the package where dropping the input took a piece of the tree with it.
+private text_of(p: *Parser, span: Span) -> string
+    var out = byte_sink()
+
+    out.write(p.src.text(span))
+    from_utf8_unchecked(out.text())
 
 // A quoted string, decoded.
 //

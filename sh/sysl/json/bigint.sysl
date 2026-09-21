@@ -1,0 +1,44 @@
+module sh.sysl.json
+
+import sysl.math.bigint.{BigInt, from_int, parse_radix, to_string}
+
+// The bridge to `sysl.math.bigint`, which is a file of its own so that it is two functions of their
+// own: a program that moves a large number from one document to another never names either, and a
+// program that has to add to one names them at the two places it crosses over.
+//
+// **This is the whole reason `Big` carries digits.** A JSON value is what a document said, and a
+// document says text; arbitrary-precision arithmetic is what a *consumer* may want to do about it.
+// Putting a `BigInt` in the variant would make every reader of every configuration file build one
+// per large number, for a program that was going to write the same digits back out -- and it would
+// put the library's representation in this package's public type, where a consumer that wanted the
+// digits would have to render them back.
+
+/** The whole number this value is, in arbitrary precision -- an `Int` as readily as a `Big`, since a
+ * caller that has decided to compute in arbitrary precision has no use for the distinction the
+ * document drew.
+ *
+ * `None` for a `Real` and for every shape that is not a number: `1.0` was written with a fraction,
+ * and what a document meant by that is the document's business. A caller that wants the integer
+ * part of one rounds it itself, where it can say which way.
+ *
+ *     to_bigint(doc.get("id").unwrap()).expect("an integer")
+ */
+to_bigint(j: Json) -> Option[BigInt] = j match
+    Int(n) -> Some(from_int(n))
+    Big(d) -> parse_radix(d, 10)
+    _ -> None
+
+/** A `BigInt` as the value a document should carry it in: an `Int` where a `long` holds it, and the
+ * digits where one does not.
+ *
+ * **Which variant comes back is the reader's rule rather than the caller's**, and keeping it in one
+ * place is what this is for. `Big(to_string(v))` at a call site would be right until the day `v`
+ * fits a `long`, and then it would build a document that renders as `5` and reads back as `Int(5)`
+ * -- a value unequal to the one that was written, from a package whose reader and writer exist to
+ * agree.
+ *
+ *     o.put("total", from_bigint(total))
+ */
+from_bigint(v: BigInt) -> Json = v.to_long() match
+    Some(n) -> Int(n)
+    None -> Big(to_string(v))
