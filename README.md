@@ -31,7 +31,7 @@ Name it in your project's `package.hocon` and `sysl build` fetches it:
 
 ```hocon
 dependencies {
-  json { git = "github.com/sysl-lang/json", version = "0.2.0" }
+  json { git = "github.com/sysl-lang/json", version = "0.2.1" }
 }
 ```
 

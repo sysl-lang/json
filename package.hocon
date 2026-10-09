@@ -8,7 +8,7 @@
 // This is the block a consumer writes to reach it:
 //
 //     dependencies {
-//       json { git = "github.com/sysl-lang/json", version = "0.2.0" }
+//       json { git = "github.com/sysl-lang/json", version = "0.2.1" }
 //     }
 //
 // The coordinate names the package, `json`; the module a program imports is `sh.sysl.json`. Naming
@@ -17,7 +17,7 @@
 
 package {
   name    = "json"
-  version = "0.2.0"
+  version = "0.2.1"
 
   // **The oldest compiler this builds with, and a library decides it now.** `sysl.math.bigint`
   // arrived in 0.0.102, and `to_bigint` and `from_bigint` are what a consumer that has to compute
@@ -37,7 +37,7 @@ package {
 }
 
 dependencies {
-  parsing { git = "github.com/sysl-lang/parsing", version = "0.2.0" }
+  parsing { git = "github.com/sysl-lang/parsing", version = "0.13.0" }
 }
 
 // **`heap = true`, and every one of the three reasons is the same one.** A document's size is not
