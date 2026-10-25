@@ -8,7 +8,7 @@
 // This is the block a consumer writes to reach it:
 //
 //     dependencies {
-//       json { git = "github.com/sysl-lang/json", version = "0.2.1" }
+//       json { git = "github.com/sysl-lang/json", version = "0.2.2" }
 //     }
 //
 // The coordinate names the package, `json`; the module a program imports is `sh.sysl.json`. Naming
@@ -17,11 +17,11 @@
 
 package {
   name    = "json"
-  version = "0.2.1"
+  version = "0.2.2"
 
-  // **The oldest compiler this builds with, and a library decides it now.** `sysl.math.bigint`
-  // arrived in 0.0.102, and `to_bigint` and `from_bigint` are what a consumer that has to compute
-  // with a number past a `long` reaches for. Nothing else here needs a compiler that new.
+  // **The oldest compiler this builds with, and a library decides it now.** 0.6.0 is where
+  // `.to_string()` and the `sysl.raw` and `sysl.c` imports arrived; `sysl.math.bigint`, behind
+  // `to_bigint` and `from_bigint`, is older still.
   //
   // **The floor before that was 0.0.88, and the reason is worth keeping because it is about the
   // central type rather than about a library.** `Obj(members: Buf[Member])` over a named `struct
@@ -33,11 +33,11 @@ package {
   // a `value` is what a caller walking an object reads, and the shapes an older compiler does
   // accept -- a tuple with no field names, or two buffers a caller keeps in step -- are public
   // payloads that could not be walked back later without breaking every consumer.
-  sysl = "0.0.102"
+  sysl = "0.6.0"
 }
 
 dependencies {
-  parsing { git = "github.com/sysl-lang/parsing", version = "0.13.0" }
+  parsing { git = "github.com/sysl-lang/parsing", version = "0.13.2" }
 }
 
 // **`heap = true`, and every one of the three reasons is the same one.** A document's size is not

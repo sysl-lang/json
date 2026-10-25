@@ -8,9 +8,9 @@ import sysl.text.{StrBuilder, from_utf8, str_builder}
 // document, changes one member and writes it back needs both, and a program that builds a request
 // body needs only this.
 //
-// **The compact form is the `Display`**, so `str(j)`, `print(j)` and `s"$j"` all produce JSON. That
+// **The compact form is the `Display`**, so `j.to_string()`, `print(j)` and `s"$j"` all produce JSON. That
 // is the rendering a wire wants -- no spaces anywhere, which is what every other encoder means by
-// compact -- and it is the one that round-trips: `parse(source_of("x", str(j)))` reads back what `j`
+// compact -- and it is the one that round-trips: `parse(source_of("x", j.to_string()))` reads back what `j`
 // held, for every value this package can hold.
 //
 // **`pretty` is for a person**, and is a different function rather than a flag, because the two have
@@ -20,7 +20,7 @@ import sysl.text.{StrBuilder, from_utf8, str_builder}
 /** The value as JSON, compactly: no space between anything.
  *
  * Rendering goes through the sink rather than building a string, so `print(j)` writes a large
- * document straight to the output with nothing assembled in the middle. `str(j)` is the same
+ * document straight to the output with nothing assembled in the middle. `j.to_string()` is the same
  * rendering into a buffer, for a caller that wants the text.
  */
 impl Display for Json
@@ -70,7 +70,7 @@ private write_number[T: Display](out: *Writer, v: T) = v.display(out, FormatSpec
 
 // A float as the shortest text that reads back as the same value.
 //
-// **`str(x)` will not do, and this is the one place the package cannot use the library's rendering.**
+// **`x.to_string()` will not do, and this is the one place the package cannot use the library's rendering.**
 // `str` is `%g` at six significant digits, so a third renders as `0.333333` -- a *different number*,
 // which is a wrong answer in a format whose whole job is carrying the value somewhere else. Writing
 // every float at seventeen digits instead is exact and unreadable: `0.1` becomes
@@ -173,7 +173,7 @@ private laid_out(j: Json, b: *StrBuilder, step: usize, depth: usize)
             b.push("\n")
             indent(b, step, depth)
             b.push("}")
-        _ -> b.push(str(j))
+        _ -> b.push(j.to_string())
 end laid_out
 
 private indent(b: *StrBuilder, step: usize, depth: usize)
@@ -246,4 +246,4 @@ end escape_of
 
 // Indexing a string yields a byte, so the character has to be asked for: `str` of the byte renders
 // the number it is, which is a wrong answer that looks like a right one.
-private hex_of(n: u8) -> string = str(char("0123456789abcdef"[usize(n)]))
+private hex_of(n: u8) -> string = char("0123456789abcdef"[usize(n)]).to_string()

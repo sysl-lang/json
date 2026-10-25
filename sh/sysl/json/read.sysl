@@ -176,7 +176,7 @@ private number(p: *Parser) -> Result[Json, Diagnostic]
 
     read match
         Err(LitError.Overflow(_)) -> Ok(Big(text_of(p, span)))
-        Err(e) -> Err(error(where(e), str(e)))
+        Err(e) -> Err(error(where(e), e.to_string()))
         Ok(n) -> Ok(n match
             Number.Real(x) -> Real(if negative then -x else x)
             Number.Int(v) -> whole(p, span, v, negative))
@@ -277,7 +277,7 @@ private read_text(p: *Parser) -> Result[string, Diagnostic]
                             .with_note("`\\u{1f600}` is sysl's spelling of one; JSON writes it `\\ud83d\\ude00`"))
 
                     read_escape(&p.s) match
-                        Err(e) -> return Err(error(where(e), str(e)))
+                        Err(e) -> return Err(error(where(e), e.to_string()))
                         Ok(ch) -> put_char(&out, ch)
 
                     run = p.s.offset
@@ -291,7 +291,7 @@ private read_text(p: *Parser) -> Result[string, Diagnostic]
     from_utf8(out.text()) match
         Ok(t) -> Ok(t)
         Err(e) -> Err(error(Span(start, p.s.offset), "this string is not UTF-8")
-            .with_note("JSON text is UTF-8, and the byte at " + str(e.offset)
+            .with_note("JSON text is UTF-8, and the byte at " + e.offset.to_string()
                 + " of this string is not part of any character"))
 end read_text
 

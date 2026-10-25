@@ -9,7 +9,7 @@ import sysl.text.str_builder
 
 // What this package claims, run by `sysl test .`.
 //
-// **A document is asserted as text rather than as a tree wherever it can be**, because `str(j)` is
+// **A document is asserted as text rather than as a tree wherever it can be**, because `j.to_string()` is
 // the compact rendering and a round trip through it is the strongest single claim here: a text that
 // reads and renders back to itself has exercised the reader and the writer against each other, and
 // nothing about the assertion has to know the shape of the value in between.
@@ -36,7 +36,7 @@ end same
 // What a text reads as, compactly, or the message it was refused with.
 private shown(text: string) -> string
     read(text) match
-        Ok(j) -> str(j)
+        Ok(j) -> j.to_string()
         Err(d) -> s"error: ${d.message}"
 
 private value_of(text: string) -> Json = read(text).unwrap()
@@ -181,8 +181,8 @@ a_large_number_converts_to_and_from_a_bigint()
     assert_eq(to_string(to_bigint(value_of("-7")).expect("an Int converts too")), "-7")
     assert(to_bigint(value_of("1.5")) == None, "a Real does not")
     assert(to_bigint(value_of("\"12\"")) == None, "and neither does a string of digits")
-    assert_eq(str(from_bigint(pow(from_int(10), 30))), "1000000000000000000000000000000")
-    assert_eq(str(from_bigint(from_int(5))), "5")
+    assert_eq(from_bigint(pow(from_int(10), 30)).to_string(),"1000000000000000000000000000000")
+    assert_eq(from_bigint(from_int(5)).to_string(),"5")
     assert(from_bigint(from_int(5)).as_int() == Some(5), "which fits, so it is an Int")
     assert(from_bigint(pow(from_int(10), 30)) == value_of("1000000000000000000000000000000"),
         "and a built document equals a read one")
@@ -335,7 +335,7 @@ members_keep_the_order_they_were_written_in()
 
     assert_eq(j.member(0).unwrap().key, "b")
     assert_eq(j.member(1).unwrap().key, "a")
-    assert_eq(str(j), "{\"b\":1,\"a\":2}")
+    assert_eq(j.to_string(), "{\"b\":1,\"a\":2}")
 end members_keep_the_order_they_were_written_in
 
 // -- equality -------------------------------------------------------------------------------------
@@ -361,10 +361,10 @@ compact_output_round_trips()
         "[1,2,3]", "{\"a\":1}", "{\"a\":[1,{\"b\":null}],\"c\":\"héllo\"}"]
 
     for i in 0..<texts.len
-        val once = str(value_of(texts[i]))
+        val once = value_of(texts[i]).to_string()
 
         assert_eq(once, texts[i])
-        assert_eq(str(value_of(once)), texts[i])
+        assert_eq(value_of(once).to_string(), texts[i])
 end compact_output_round_trips
 
 @test
@@ -383,8 +383,8 @@ end a_string_is_written_back_with_its_escapes
 a_control_character_survives_a_round_trip()
     val j = Str("a\u{1}b\u{1f}c")
 
-    assert_eq(str(j), "\"a\\u0001b\\u001fc\"")
-    assert(value_of(str(j)) == j, "and reads back the same")
+    assert_eq(j.to_string(), "\"a\\u0001b\\u001fc\"")
+    assert(value_of(j.to_string()) == j, "and reads back the same")
 
 @test
 pretty_is_for_a_person()
@@ -433,7 +433,7 @@ an_object_is_built_a_member_at_a_time()
 
     o.put("tags", tags.finish())
 
-    assert_eq(str(o.finish()),
+    assert_eq(o.finish().to_string(),
         "{\"name\":\"sysl\",\"port\":8080,\"tls\":true,\"load\":0.25,\"parent\":null,\"tags\":[\"systems\",3]}")
 end an_object_is_built_a_member_at_a_time
 
@@ -445,14 +445,14 @@ a_builder_says_how_far_it_has_got()
     a.push_null()
     assert_eq(a.len(), 1)
     assert(!a.is_empty(), "and now there is")
-    assert_eq(str(a.finish()), "[null]")
+    assert_eq(a.finish().to_string(),"[null]")
 end a_builder_says_how_far_it_has_got
 
 @test
 a_slice_becomes_an_array_with_no_builder()
-    assert_eq(str(array_of([Int(1), Int(2), Int(3)])), "[1,2,3]")
-    assert_eq(str(array_of_str(["a", "b"])), "[\"a\",\"b\"]")
-    assert_eq(str(array_of([])), "[]")
+    assert_eq(array_of([Int(1), Int(2), Int(3)]).to_string(), "[1,2,3]")
+    assert_eq(array_of_str(["a", "b"]).to_string(), "[\"a\",\"b\"]")
+    assert_eq(array_of([]).to_string(), "[]")
 
 // What a program that builds a document and reads it back is really claiming.
 @test
@@ -464,7 +464,7 @@ what_is_built_reads_back_as_what_was_put_in()
 
     val j = o.finish()
 
-    assert(value_of(str(j)) == j, "through the text and back")
+    assert(value_of(j.to_string()) == j, "through the text and back")
 end what_is_built_reads_back_as_what_was_put_in
 
 // -- the message a person reads -------------------------------------------------------------------
@@ -511,25 +511,25 @@ end an_error_names_where_the_bracket_opened
 
 // -- what the probing turned up -------------------------------------------------------------------
 
-// `str(x)` is `%g` at six significant digits, which would write a third as `0.333333` -- a different
+// `x.to_string()` is `%g` at six significant digits, which would write a third as `0.333333` -- a different
 // number. These are the values that say the shortest-round-trip rule is doing its job.
 @test
 a_float_is_written_as_the_shortest_text_that_reads_back()
-    assert_eq(str(Real(0.1)), "0.1")
-    assert_eq(str(Real(1.0 / 3.0)), "0.3333333333333333")
-    assert_eq(str(Real(1.0e300)), "1e+300")
-    assert_eq(str(Real(0.0)), "0.0")
-    assert_eq(str(Real(-0.0)), "-0.0")
-    assert(value_of(str(Real(1.0 / 3.0))).as_real() == Some(1.0 / 3.0), "and it reads back exactly")
+    assert_eq(Real(0.1).to_string(), "0.1")
+    assert_eq(Real(1.0 / 3.0).to_string(), "0.3333333333333333")
+    assert_eq(Real(1.0e300).to_string(), "1e+300")
+    assert_eq(Real(0.0).to_string(), "0.0")
+    assert_eq(Real(-0.0).to_string(), "-0.0")
+    assert(value_of(Real(1.0 / 3.0).to_string()).as_real() == Some(1.0 / 3.0), "and it reads back exactly")
 end a_float_is_written_as_the_shortest_text_that_reads_back
 
 // The two numeric variants are only worth having if a round trip keeps them apart, which is what the
 // trailing `.0` is for.
 @test
 a_float_with_no_fraction_keeps_its_point()
-    assert_eq(str(Real(1.0)), "1.0")
-    assert_eq(str(Real(-2.0)), "-2.0")
-    assert(value_of(str(Real(1.0))).as_int() == None, "so it does not read back as an integer")
+    assert_eq(Real(1.0).to_string(), "1.0")
+    assert_eq(Real(-2.0).to_string(), "-2.0")
+    assert(value_of(Real(1.0).to_string()).as_int() == None, "so it does not read back as an integer")
     assert_eq(shown("1E+2"), "100.0")
 
 // JSON's grammar has no spelling for either, so there is nothing to write. `null` is what
@@ -621,7 +621,7 @@ an_array_can_be_made_from_a_buffers_view()
     b.push(Int(1))
     b.push(Str("x"))
 
-    assert_eq(str(array_of(b.view())), "[1,\"x\"]")
+    assert_eq(array_of(b.view()).to_string(),"[1,\"x\"]")
 end an_array_can_be_made_from_a_buffers_view
 
 // The README's two examples, so that the page cannot drift from what the package does.
@@ -633,7 +633,7 @@ the_readme_examples_do_what_they_say()
     assert_eq(doc.get("port").unwrap().as_int(), Some(8080))
     assert_eq(doc.get("tags").unwrap().len(), 2)
     assert(doc.get("missing") == None, "nothing under that name")
-    assert_eq(str(doc), "{\"port\":8080,\"tls\":true,\"tags\":[\"a\",\"b\"]}")
+    assert_eq(doc.to_string(),"{\"port\":8080,\"tls\":true,\"tags\":[\"a\",\"b\"]}")
 
     var o = object_builder()
 
@@ -642,7 +642,7 @@ the_readme_examples_do_what_they_say()
     o.put_bool("tls", true)
     o.put("tags", array_of_str(["systems", "small"]))
 
-    assert_eq(str(o.finish()),
+    assert_eq(o.finish().to_string(),
         "{\"name\":\"sysl\",\"port\":8080,\"tls\":true,\"tags\":[\"systems\",\"small\"]}")
 
     same(pretty(doc, 2),

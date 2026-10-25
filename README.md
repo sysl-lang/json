@@ -31,7 +31,7 @@ Name it in your project's `package.hocon` and `sysl build` fetches it:
 
 ```hocon
 dependencies {
-  json { git = "github.com/sysl-lang/json", version = "0.2.1" }
+  json { git = "github.com/sysl-lang/json", version = "0.2.2" }
 }
 ```
 
@@ -103,7 +103,7 @@ val doc = parse(source_of("t.json", "{\"id\": 123456789012345678901234567890}"))
 
 print(doc.get("id").unwrap().as_big().unwrap())
 print(to_string(to_bigint(doc.get("id").unwrap()).unwrap() + from_int(1)))
-print(str(from_bigint(pow(from_int(10), 30))))
+print(from_bigint(pow(from_int(10), 30)).to_string())
 ```
 
 ```
@@ -134,7 +134,7 @@ none, so an accessor chain is safe to write against a document nobody has checke
 
 ## Writing
 
-The compact rendering is the `Display`, so `str(j)`, `print(j)` and `s"$j"` all produce JSON:
+The compact rendering is the `Display`, so `j.to_string()`, `print(j)` and `s"$j"` all produce JSON:
 
 ```sysl
 print(doc)                    // {"port":8080,"tls":true,"tags":["a","b"]}
@@ -152,7 +152,7 @@ print(pretty(doc, 2))
 }
 ```
 
-**A float is written as the shortest text that reads back as the same value.** `str(x)` is `%g` at
+**A float is written as the shortest text that reads back as the same value.** `x.to_string()` is `%g` at
 six significant digits, which would write a third as `0.333333` — a different number, in a format
 whose whole job is carrying the value somewhere else. A float with no fraction keeps a `.0`, so that
 `Real(1.0)` does not read back as `Int(1)`; a NaN or an infinity is written `null`, which is what
