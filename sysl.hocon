@@ -8,7 +8,7 @@
 // This is the block a consumer writes to reach it:
 //
 //     dependencies {
-//       json { git = "github.com/sysl-lang/json", version = "0.2.2" }
+//       json { git = "github.com/sysl-lang/json", version = "0.2.3" }
 //     }
 //
 // The coordinate names the package, `json`; the module a program imports is `sh.sysl.json`. Naming
@@ -17,7 +17,7 @@
 
 package {
   name    = "json"
-  version = "0.2.2"
+  version = "0.2.3"
 
   // **The oldest compiler this builds with, and a library decides it now.** 0.6.0 is where
   // `.to_string()` and the `sysl.raw` and `sysl.c` imports arrived; `sysl.math.bigint`, behind
