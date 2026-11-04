@@ -45,7 +45,7 @@ private compact(j: Json, out: *Writer)
             for i in 0..<items.len()
                 if i > 0 then out.write(",".bytes)
 
-                compact(items.at(i), out)
+                compact(items[i], out)
 
             out.write("]".bytes)
         Obj(members) ->
@@ -54,7 +54,7 @@ private compact(j: Json, out: *Writer)
             for i in 0..<members.len()
                 if i > 0 then out.write(",".bytes)
 
-                val m = members.at(i)
+                val m = members[i]
 
                 quote(m.key, out)
                 out.write(":".bytes)
@@ -148,7 +148,7 @@ private laid_out(j: Json, b: *StrBuilder, step: usize, depth: usize)
                 if i > 0 then b.push(",\n")
 
                 indent(b, step, depth + 1)
-                laid_out(items.at(i), b, step, depth + 1)
+                laid_out(items[i], b, step, depth + 1)
 
             b.push("\n")
             indent(b, step, depth)
@@ -163,7 +163,7 @@ private laid_out(j: Json, b: *StrBuilder, step: usize, depth: usize)
             for i in 0..<members.len()
                 if i > 0 then b.push(",\n")
 
-                val m = members.at(i)
+                val m = members[i]
 
                 indent(b, step, depth + 1)
                 quote_into(m.key, b)
